@@ -1,0 +1,21 @@
+{
+  "name": "doctor-receptionist-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WhatsApp receptionist webhook for a doctor's practice",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "googleapis": "^144.0.0",
+    "express": "^4.21.2",
+    "twilio": "^5.4.0"
+  }
+}
