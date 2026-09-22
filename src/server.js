@@ -420,7 +420,23 @@ app.post('/webhooks/whatsapp', async (request, response) => {
 
   return response.type('text/xml').send(twiml.toString());
 });
-
+// Google Sheet mein appointment save karne ka function
+async function saveAppointmentToSheet(patientData) {
+    const googleScriptURL = 'YAHAN_APNA_WOH_COPIED_URL_PASTE_KAREIN'; // Isko hata kar apna Google Web App URL yahan daalein
+    
+    try {
+        const response = await axios.post(googleScriptURL, {
+            name: patientData.name,
+            phone: patientData.phone,
+            date: patientData.date,
+            time: patientData.time,
+            symptoms: patientData.symptoms
+        });
+        console.log('Appointment saved to Google Sheet successfully:', response.data);
+    } catch (error) {
+        console.error('Error saving to sheet:', error);
+    }
+}
 app.use((_request, response) => {
   response.status(404).json({ error: 'Not found' });
 });
