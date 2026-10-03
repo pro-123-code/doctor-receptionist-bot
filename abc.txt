@@ -1,0 +1,480 @@
+require('dotenv').config();
+
+const express = require('express');
+const { google } = require('googleapis');
+const {
+  default: makeWASocket,
+  DisconnectReason,
+  useMultiFileAuthState
+} = require('@whiskeysockets/baileys');
+const qrcode = require('qrcode-terminal');
+
+const app = express();
+const port = Number.parseInt(process.env.PORT || '3000', 10);
+const conversations = new Map();
+const bookingLocks = new Map();
+const calendarId = process.env.GOOGLE_CALENDAR_ID || 'primary';
+const timeZone = process.env.GOOGLE_TIME_ZONE || 'UTC';
+const appointmentDurationMinutes = Number.parseInt(
+  process.env.APPOINTMENT_DURATION_MINUTES || '30',
+  10
+);
+const appointmentLookaheadDays = Number.parseInt(
+  process.env.APPOINTMENT_LOOKAHEAD_DAYS || '7',
+  10
+);
+const officeStartHour = Number.parseInt(process.env.OFFICE_START_HOUR || '9', 10);
+const officeEndHour = Number.parseInt(process.env.OFFICE_END_HOUR || '17', 10);
+const maxInputLength = 500;
+const maxNameLength = 100;
+const maxPhoneLength = 30;
+const maxSymptomsLength = 500;
+const conversationTtlMs = 30 * 60 * 1000;
+
+const conversationSteps = {
+  name: {
+    next: 'contactNumber',
+    reply: 'Shukriya, {name}. Aap ka behtareen contact number kya hai?'
+  },
+  contactNumber: {
+    next: 'majorSymptoms',
+    reply: 'Bohat shukriya. Aap ki visit ki bunyadi wajah ya alamat kya hain?'
+  },
+  majorSymptoms: {
+    next: 'calendarSelection'
+  }
+};
+
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  throw new Error('PORT must be a valid TCP port number');
+}
+
+if (
+  !Number.isInteger(appointmentDurationMinutes) ||
+  appointmentDurationMinutes < 15 ||
+  !Number.isInteger(appointmentLookaheadDays) ||
+  appointmentLookaheadDays < 1 ||
+  !Number.isInteger(officeStartHour) ||
+  !Number.isInteger(officeEndHour) ||
+  officeStartHour < 0 ||
+  officeEndHour > 24 ||
+  officeStartHour >= officeEndHour
+) {
+  throw new Error('Invalid appointment or office-hours configuration');
+}
+
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+
+app.get('/health', (_request, response) => {
+  response.json({ status: 'ok' });
+});
+
+function getCalendarClient() {
+  const requiredCredentials = [
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_REFRESH_TOKEN'
+  ];
+  const missingCredential = requiredCredentials.find((name) => !process.env[name]);
+
+  if (missingCredential) {
+    throw new Error(`Missing Google Calendar configuration: ${missingCredential}`);
+  }
+
+  const auth = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  );
+  auth.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+  return google.calendar({ version: 'v3', auth });
+}
+
+function getTimeRange() {
+  const start = new Date();
+  const end = new Date(start.getTime() + appointmentLookaheadDays * 24 * 60 * 60 * 1000);
+  return { timeMin: start.toISOString(), timeMax: end.toISOString() };
+}
+
+function isGreeting(message) {
+  return /^(assalam(?:-?o-?alaikum| alaikum)|salam)[!.\s]*$/i.test(message.trim());
+}
+
+function getZonedParts(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+  return Object.fromEntries(
+    parts.filter(({ type }) => type !== 'literal').map(({ type, value }) => [type, Number(value)])
+  );
+}
+
+function zonedDateTimeToUtc(year, month, day, hour, minute) {
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute);
+  const actual = getZonedParts(new Date(utcGuess));
+  const actualAsUtc = Date.UTC(
+    actual.year,
+    actual.month - 1,
+    actual.day,
+    actual.hour,
+    actual.minute,
+    actual.second
+  );
+  return new Date(utcGuess + (utcGuess - actualAsUtc));
+}
+
+function addLocalDays(parts, days) {
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days, 12));
+  return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
+}
+
+function buildCandidateSlots(timeMin, timeMax) {
+  const slots = [];
+  const rangeStart = new Date(timeMin);
+  const rangeEnd = new Date(timeMax);
+  const startParts = getZonedParts(rangeStart);
+  let localDate = { year: startParts.year, month: startParts.month, day: startParts.day };
+
+  for (let dayOffset = 0; dayOffset <= appointmentLookaheadDays; dayOffset += 1) {
+    const date = addLocalDays(localDate, dayOffset);
+    const noon = zonedDateTimeToUtc(date.year, date.month, date.day, 12, 0);
+    const weekdayName = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      weekday: 'short'
+    }).format(noon);
+    const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekdayName);
+
+    if (weekday > 0 && weekday < 6) {
+      for (
+        let minutes = officeStartHour * 60;
+        minutes + appointmentDurationMinutes <= officeEndHour * 60;
+        minutes += appointmentDurationMinutes
+      ) {
+        const hour = Math.floor(minutes / 60);
+        const minute = minutes % 60;
+        const start = zonedDateTimeToUtc(date.year, date.month, date.day, hour, minute);
+        const end = new Date(start.getTime() + appointmentDurationMinutes * 60 * 1000);
+
+        if (start >= rangeStart && end <= rangeEnd) {
+          slots.push({ start, end });
+        }
+      }
+    }
+  }
+
+  return slots;
+}
+
+function overlaps(slot, busyPeriod) {
+  return (
+    slot.start < new Date(busyPeriod.end) &&
+    slot.end > new Date(busyPeriod.start)
+  );
+}
+
+function formatSlot(slot, index) {
+  const parts = getZonedParts(slot.start);
+  const weekdayIndex = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(
+    new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(slot.start)
+  );
+  const weekdayNames = ['Itwaar', 'Peer', 'Mangal', 'Budh', 'Jumerat', 'Jumma', 'Hafta'];
+  const monthNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  const hour = parts.hour % 12 || 12;
+  const meridiem = parts.hour >= 12 ? 'PM' : 'AM';
+  const formatted = `${weekdayNames[weekdayIndex]}, ` +
+    `${parts.day} ${monthNames[parts.month - 1]} ${hour}:${String(parts.minute).padStart(2, '0')} ${meridiem}`;
+  return `${index + 1}. ${formatted} (${timeZone})`;
+}
+
+async function getBusyPeriods(timeMin, timeMax) {
+  const calendar = getCalendarClient();
+  let freeBusy;
+  try {
+    freeBusy = await calendar.freebusy.query({
+      requestBody: {
+        timeMin,
+        timeMax,
+        timeZone,
+        items: [{ id: calendarId }]
+      }
+    });
+  } catch (error) {
+    const apiMessage = error.response?.data?.error?.message || error.message;
+    throw new Error(`Google Calendar free/busy query failed: ${apiMessage}`);
+  }
+
+  const calendarData = freeBusy.data?.calendars?.[calendarId];
+  if (!calendarData) {
+    throw new Error(`Google Calendar was not returned: ${calendarId}`);
+  }
+  if (calendarData.errors?.length) {
+    const calendarError = calendarData.errors
+      .map(({ domain, reason }) => [domain, reason].filter(Boolean).join(': '))
+      .join(', ');
+    throw new Error(`Google Calendar free/busy error: ${calendarError}`);
+  }
+
+  return { busyPeriods: Array.isArray(calendarData.busy) ? calendarData.busy : [] };
+}
+
+async function findAvailableSlots() {
+  const { timeMin, timeMax } = getTimeRange();
+  const { busyPeriods } = await getBusyPeriods(timeMin, timeMax);
+
+  return buildCandidateSlots(timeMin, timeMax).filter(
+    (slot) => !busyPeriods.some((busyPeriod) => overlaps(slot, busyPeriod))
+  ).slice(0, 8);
+}
+
+async function bookAppointment(conversation, slot) {
+  const lockKey = `${slot.start.toISOString()}-${slot.end.toISOString()}`;
+  const previousLock = bookingLocks.get(lockKey) || Promise.resolve();
+  let releaseLock;
+  const currentLock = new Promise((resolve) => { releaseLock = resolve; });
+  const lockChain = previousLock.then(() => currentLock);
+  bookingLocks.set(lockKey, lockChain);
+
+  await previousLock;
+  try {
+  const calendar = getCalendarClient();
+  const { timeMin, timeMax } = getTimeRange();
+  const { busyPeriods } = await getBusyPeriods(timeMin, timeMax);
+
+  if (busyPeriods.some((busyPeriod) => overlaps(slot, busyPeriod))) {
+    return false;
+  }
+
+  await calendar.events.insert({
+    calendarId,
+    sendUpdates: 'all',
+    requestBody: {
+      summary: `Patient appointment: ${conversation.details.name}`,
+      description: [
+        `Name: ${conversation.details.name}`,
+        `Contact: ${conversation.details.contactNumber}`,
+        `Symptoms: ${conversation.details.majorSymptoms}`
+      ].join('\n'),
+      start: { dateTime: slot.start.toISOString(), timeZone },
+      end: { dateTime: slot.end.toISOString(), timeZone }
+    }
+  });
+
+  return true;
+  } finally {
+    releaseLock();
+    if (bookingLocks.get(lockKey) === lockChain) bookingLocks.delete(lockKey);
+  }
+}
+
+function validatePatientInput(step, value) {
+  if (value.length === 0 || value.length > maxInputLength) return false;
+  if (step === 'name') return value.length <= maxNameLength && /^[\p{L} .'-]+$/u.test(value);
+  if (step === 'contactNumber') {
+    return value.length <= maxPhoneLength && /^\+?[0-9][0-9 ()-]{6,28}$/.test(value);
+  }
+  return value.length <= maxSymptomsLength;
+}
+
+function saveCalendarRetry(sender, conversation) {
+  conversation.step = 'calendarSelection';
+  conversation.slots = [];
+  conversation.updatedAt = Date.now();
+  conversations.set(sender, conversation);
+}
+
+async function handleConversationMessage(sender, message) {
+  const normalizedMessage = message.trim();
+
+  if (isGreeting(normalizedMessage)) {
+    return 'Walaikum Assalam! Khush aamdeed. Meherbani karke apna naam batayein.';
+  }
+
+  if (/^(restart|start over)$/i.test(normalizedMessage)) {
+    conversations.delete(sender);
+    return 'Bilkul. Meherbani karke apna naam batayein.';
+  }
+
+  let conversation = conversations.get(sender);
+  if (conversation && Date.now() - conversation.updatedAt > conversationTtlMs) {
+    conversations.delete(sender);
+    conversation = undefined;
+  }
+  conversation = conversation || {
+    step: 'name',
+    details: {},
+    updatedAt: Date.now()
+  };
+  if (conversation.step === 'calendarSelection') {
+    if (!conversation.slots?.length) {
+      try {
+        const availableSlots = await findAvailableSlots();
+        if (!availableSlots.length) return 'Maazrat, is waqt koi appointment ka waqt dastiyab nahi hai.';
+        conversation.slots = availableSlots;
+        conversation.updatedAt = Date.now();
+        conversations.set(sender, conversation);
+        return 'Meherbani karke neeche diye gaye auqaat mein se ek muntakhib karein:\n' +
+          availableSlots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
+      } catch (error) {
+        console.error('Calendar availability error:', error);
+        return 'Maazrat, waqt check karne mein mushkil aa rahi hai. Meherbani karke thori dair baad dobara reply karein.';
+      }
+    }
+
+    if (!/^\d+$/.test(normalizedMessage)) {
+      return 'Meherbani karke upar diye gaye kisi slot ka number reply karein.';
+    }
+    const selectedIndex = Number(normalizedMessage) - 1;
+    const selectedSlot = conversation.slots?.[selectedIndex];
+
+    if (!selectedSlot) {
+      return 'Yeh slot number durust nahi hai. Meherbani karke upar diye gaye kisi slot ka number reply karein.';
+    }
+
+    let booked;
+    try {
+      booked = await bookAppointment(conversation, {
+        start: new Date(selectedSlot.start),
+        end: new Date(selectedSlot.end)
+      });
+    } catch (error) {
+      console.error('Calendar booking error:', error);
+      saveCalendarRetry(sender, conversation);
+      return 'Maazrat, appointment save karne mein mushkil aa gayi. Meherbani karke thori dair baad dobara reply karein.';
+    }
+
+    if (!booked) {
+      try {
+        conversation.step = 'calendarSelection';
+        conversation.slots = await findAvailableSlots();
+        if (!conversation.slots.length) {
+          conversations.delete(sender);
+          return 'Maazrat, woh waqt abhi kisi aur ne le liya hai aur is waqt koi doosra waqt dastiyab nahi hai.';
+        }
+        conversation.updatedAt = Date.now();
+        conversations.set(sender, conversation);
+        return 'Maazrat, woh waqt abhi kisi aur ne le liya hai. Meherbani karke doosra waqt muntakhib karein:\n' +
+          conversation.slots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
+      } catch (error) {
+        console.error('Calendar refresh error:', error);
+        saveCalendarRetry(sender, conversation);
+        return 'Woh waqt abhi kisi aur ne le liya hai. Auqaat dobara check karne mein mushkil aa rahi hai; meherbani karke thori dair baad reply karein.';
+      }
+    }
+
+    conversations.delete(sender);
+    return 'Aap ki appointment kamyabi se book ho gayi hai. Hum jald aap se mulaqat ke muntazir hain.';
+  }
+
+  const currentStep = conversationSteps[conversation.step];
+
+  if (!validatePatientInput(conversation.step, normalizedMessage)) {
+    if (conversation.step === 'name') return 'Meherbani karke sirf huroof mein apna naam batayein (zyada se zyada 100 huroof).';
+    if (conversation.step === 'contactNumber') return 'Meherbani karke durust phone number batayein, mumkin ho to country code ke saath.';
+    return 'Meherbani karke alamat ki tafseel 500 characters se kam rakhein.';
+  }
+
+  conversation.details[conversation.step] = normalizedMessage;
+  conversation.step = currentStep.next;
+  conversation.updatedAt = Date.now();
+
+  if (conversation.step === 'calendarSelection') {
+    let availableSlots;
+    try {
+      availableSlots = await findAvailableSlots();
+    } catch (error) {
+      console.error('Calendar availability error:', error);
+      saveCalendarRetry(sender, conversation);
+      return 'Maazrat, waqt check karne mein mushkil aa rahi hai. Meherbani karke thori dair baad dobara reply karein.';
+    }
+
+    if (availableSlots.length === 0) {
+      conversations.delete(sender);
+      return 'Maazrat, is waqt koi appointment ka waqt dastiyab nahi hai. Hamari team aap se rabta karegi.';
+    }
+
+    conversation.slots = availableSlots;
+    conversations.set(sender, conversation);
+    return 'Shukriya, ' + conversation.details.name + '. Neeche diye gaye auqaat mein se ek muntakhib karein:\n' +
+      availableSlots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
+  }
+
+  conversations.set(sender, conversation);
+
+  return currentStep.reply.replace('{name}', conversation.details.name || normalizedMessage);
+}
+
+app.use((_request, response) => {
+  response.status(404).json({ error: 'Not found' });
+});
+
+async function startWhatsApp() {
+  const { state, saveCreds } = await useMultiFileAuthState(
+    process.env.BAILEYS_AUTH_DIR || 'auth_info_baileys'
+  );
+  const socket = makeWASocket({
+    auth: state,
+    browser: ['Doctor Receptionist', 'Chrome', '1.0.0'],
+    markOnlineOnConnect: false
+  });
+
+  socket.ev.on('creds.update', saveCreds);
+  socket.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      console.log('Scan this WhatsApp QR code with the WhatsApp mobile app.');
+      qrcode.generate(qr, { small: true });
+    }
+    if (connection === 'open') console.log('WhatsApp connection ready.');
+    if (connection === 'close') {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      if (statusCode !== DisconnectReason.loggedOut) {
+        console.log('WhatsApp connection closed; reconnecting.');
+        startWhatsApp().catch((error) => console.error('WhatsApp reconnect error:', error));
+      } else {
+        console.error('WhatsApp logged out. Delete the Baileys auth directory and restart.');
+      }
+    }
+  });
+
+  socket.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const message of messages) {
+      const sender = message.key.remoteJid;
+      const incomingMessage = message.message?.conversation ||
+        message.message?.extendedTextMessage?.text;
+
+      if (message.key.fromMe || !sender || sender.endsWith('@g.us') || !incomingMessage) {
+        continue;
+      }
+
+      console.log(`WhatsApp message received from ${sender}`);
+      let reply;
+      try {
+        reply = await handleConversationMessage(sender, incomingMessage);
+      } catch (error) {
+        console.error('WhatsApp conversation error:', error);
+        reply = 'Maazrat, appointment check karne mein mushkil aa rahi hai. Meherbani karke thori dair baad dobara reply karein.';
+      }
+
+      await socket.sendMessage(sender, { text: reply });
+    }
+  });
+}
+
+app.listen(port, () => {
+  console.log(`Doctor receptionist health server listening on port ${port}`);
+  startWhatsApp().catch((error) => {
+    console.error('WhatsApp startup error:', error);
+    process.exitCode = 1;
+  });
+});

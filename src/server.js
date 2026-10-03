@@ -1,23 +1,34 @@
 require('dotenv').config();
-
+const crypto = require('node:crypto');
+const path = require('node:path');
 const express = require('express');
 const { google } = require('googleapis');
-const twilio = require('twilio');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const qrcode = require('qrcode-terminal');
+const mongoose = require('mongoose');
+const { Appointment, connectDatabase, deleteConversation, Doctor, getConversation, recordServiceLog, saveConversation } = require('./models');
+const { extractPatientField, extractSlotNumber } = require('./gemini');
+const { getLocalDateParts, getLocalDayBounds, parseRequestedDate } = require('./dateParser');
+const { mountDashboard } = require('./dashboard');
+const { startDailyReport } = require('./cronJobs');
+const { getCalendarErrorDetails } = require('./calendarErrors');
+const { getWelcomeMessage } = require('./greetings');
+const { decryptJson } = require('./secretBox');
 
 const app = express();
 const port = Number.parseInt(process.env.PORT || '3000', 10);
-const conversations = new Map();
+app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
 const bookingLocks = new Map();
-const calendarId = process.env.GOOGLE_CALENDAR_ID || 'primary';
-const timeZone = process.env.GOOGLE_TIME_ZONE || 'UTC';
-const appointmentDurationMinutes = Number.parseInt(
-  process.env.APPOINTMENT_DURATION_MINUTES || '30',
-  10
-);
-const appointmentLookaheadDays = Number.parseInt(
-  process.env.APPOINTMENT_LOOKAHEAD_DAYS || '7',
-  10
-);
+const conversationLocks = new Map();
+const activeReminders = new Map();
+const whatsappSockets = new Map();
+const startingDoctorIds = new Set();
+
+const clinicId = process.env.CLINIC_ID || process.env.DOCTOR_ID;
+const doctorId = process.env.DOCTOR_ID || clinicId;
+const timeZone = 'Asia/Karachi';
+const appointmentDurationMinutes = Number.parseInt(process.env.APPOINTMENT_DURATION_MINUTES || '30', 10);
+const appointmentLookaheadDays = Number.parseInt(process.env.APPOINTMENT_LOOKAHEAD_DAYS || '7', 10);
 const officeStartHour = Number.parseInt(process.env.OFFICE_START_HOUR || '9', 10);
 const officeEndHour = Number.parseInt(process.env.OFFICE_END_HOUR || '17', 10);
 const maxInputLength = 500;
@@ -27,83 +38,130 @@ const maxSymptomsLength = 500;
 const conversationTtlMs = 30 * 60 * 1000;
 
 const conversationSteps = {
-  name: {
-    next: 'contactNumber',
-    reply: 'Thanks, {name}. What is the best contact number for you?'
-  },
-  contactNumber: {
-    next: 'majorSymptoms',
-    reply: 'Thank you. What are the main symptoms or reason for your visit?'
-  },
-  majorSymptoms: {
-    next: 'calendarSelection'
-  }
+  name: { next: 'contactNumber', reply: 'Shukriya, {name}. Aap ka behtareen contact number kya hai?' },
+  contactNumber: { next: 'majorSymptoms', reply: 'Bohat shukriya. Aap ki visit ki bunyadi wajah ya alamat kya hain?' },
+  majorSymptoms: { next: 'appointmentDate', reply: 'Shukriya. Aap kis tareekh ko appointment lena chahenge? Misal: kal, next Friday, ya 25th October.' },
+  appointmentDate: { next: 'calendarSelection' }
 };
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error('PORT must be a valid TCP port number');
 }
 
+if (!doctorId || !/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(doctorId)) {
+  throw new Error('DOCTOR_ID must be a 3-64 character lowercase slug');
+}
+
+if (process.env.GOOGLE_TIME_ZONE && process.env.GOOGLE_TIME_ZONE !== timeZone) {
+  throw new Error('GOOGLE_TIME_ZONE must be Asia/Karachi');
+}
+
 if (
-  !Number.isInteger(appointmentDurationMinutes) ||
-  appointmentDurationMinutes < 15 ||
-  !Number.isInteger(appointmentLookaheadDays) ||
-  appointmentLookaheadDays < 1 ||
-  !Number.isInteger(officeStartHour) ||
-  !Number.isInteger(officeEndHour) ||
-  officeStartHour < 0 ||
-  officeEndHour > 24 ||
-  officeStartHour >= officeEndHour
+  !Number.isInteger(appointmentDurationMinutes) || appointmentDurationMinutes < 15 ||
+  !Number.isInteger(appointmentLookaheadDays) || appointmentLookaheadDays < 1 ||
+  !Number.isInteger(officeStartHour) || !Number.isInteger(officeEndHour) ||
+  officeStartHour < 0 || officeEndHour > 24 || officeStartHour >= officeEndHour
 ) {
   throw new Error('Invalid appointment or office-hours configuration');
 }
+
+app.use((request, response, next) => {
+  if (process.env.NODE_ENV === 'production' && !request.secure) {
+    return response.status(400).json({ error: 'HTTPS required' });
+  }
+  next();
+});
 
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 app.get('/health', (_request, response) => {
-  response.json({ status: 'ok' });
+  const databaseReady = mongoose.connection.readyState === 1;
+  response.status(databaseReady ? 200 : 503).json({ status: databaseReady ? 'ok' : 'degraded' });
 });
 
-function isValidTwilioRequest(request) {
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
-  const signature = request.get('X-Twilio-Signature');
-  const baseUrl = (process.env.WEBHOOK_BASE_URL || `${request.protocol}://${request.get('host')}`)
-    .replace(/\/$/, '');
-  const requestUrl = `${baseUrl}${request.originalUrl}`;
+app.get('/dashboard.webmanifest', (_request, response) => {
+  response.sendFile(path.join(__dirname, 'dashboard.webmanifest'));
+});
+app.get('/dashboard-icon.svg', (_request, response) => {
+  response.type('image/svg+xml').sendFile(path.join(__dirname, 'dashboard-icon.svg'));
+});
+app.get('/dashboard-sw.js', (_request, response) => {
+  response.type('application/javascript').sendFile(path.join(__dirname, 'dashboard-sw.js'));
+});
 
-  return Boolean(
-    authToken &&
-    signature &&
-    twilio.validateRequest(authToken, signature, requestUrl, request.body)
-  );
+mountDashboard(app, Appointment, timeZone, doctorId);
+
+function logServiceError(operation, error, sensitiveValues = [], targetDoctorId = doctorId) {
+  const isCalendarOperation = /^Calendar\b/.test(operation);
+  const details = isCalendarOperation
+    ? getCalendarErrorDetails(error)
+    : { message: '', status: undefined, code: error?.code };
+  const { status, code } = details;
+  let message = details.message;
+  for (const value of sensitiveValues) {
+    if (typeof value === 'string' && value.length >= 3) {
+      message = message.split(value).join('[PATIENT DATA REDACTED]');
+    }
+  }
+  const statusLabel = status ? ` HTTP ${status}` : '';
+  const codeLabel = code ? ` [${code}]` : '';
+  const messageLabel = message ? `: ${message}` : '';
+  console.error(`${operation} failed (${error?.name || 'Error'})${statusLabel}${codeLabel}${messageLabel}`);
+  recordServiceLog(operation, code, targetDoctorId);
 }
 
-function getCalendarClient() {
-  const requiredCredentials = [
-    'GOOGLE_CLIENT_ID',
-    'GOOGLE_CLIENT_SECRET',
-    'GOOGLE_REFRESH_TOKEN'
-  ];
-  const missingCredential = requiredCredentials.find((name) => !process.env[name]);
-
-  if (missingCredential) {
-    throw new Error(`Missing Google Calendar configuration: ${missingCredential}`);
-  }
+function getCalendarClient(doctorProfile) {
+  const storedCredentials = doctorProfile.googleCredentialsEncrypted
+    ? decryptJson(doctorProfile.googleCredentialsEncrypted)
+    : doctorProfile.doctorId === doctorId
+      ? {
+        clientId: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        refreshToken: process.env.GOOGLE_REFRESH_TOKEN
+      }
+      : null;
+  const credentials = {
+    clientId: storedCredentials?.clientId || process.env.GOOGLE_CLIENT_ID,
+    clientSecret: storedCredentials?.clientSecret || process.env.GOOGLE_CLIENT_SECRET,
+    refreshToken: storedCredentials?.refreshToken
+  };
+  const missingCredential = !credentials.clientId ? 'GOOGLE_CLIENT_ID' :
+    !credentials.clientSecret ? 'GOOGLE_CLIENT_SECRET' :
+      !credentials.refreshToken ? 'GOOGLE_REFRESH_TOKEN' : null;
+  if (missingCredential) throw new Error(`Missing Google Calendar configuration: ${missingCredential}`);
 
   const auth = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
+    credentials.clientId,
+    credentials.clientSecret
   );
-  auth.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+  auth.setCredentials({ refresh_token: credentials.refreshToken });
   return google.calendar({ version: 'v3', auth });
 }
 
-function getTimeRange() {
+function getTimeRange(requestedDate) {
+  if (requestedDate) {
+    const dateParts = typeof requestedDate === 'string'
+      ? requestedDate.split('-').map(Number).reduce((parts, value, index) => {
+        parts[['year', 'month', 'day'][index]] = value;
+        return parts;
+      }, {})
+      : requestedDate;
+    const bounds = getLocalDayBounds(dateParts, timeZone);
+    return { timeMin: bounds.start.toISOString(), timeMax: bounds.end.toISOString() };
+  }
+
   const start = new Date();
-  const end = new Date(start);
-  end.setDate(end.getDate() + appointmentLookaheadDays);
+  const end = new Date(start.getTime() + appointmentLookaheadDays * 24 * 60 * 60 * 1000);
   return { timeMin: start.toISOString(), timeMax: end.toISOString() };
+}
+
+function isGreeting(message) {
+  return /^(assalam(?:-?o-?alaikum| alaikum)|salam)[!.\s]*$/i.test(message.trim());
+}
+
+function isFacilityQuestion(message) {
+  return /\b(facilit(?:y|ies)|services?|what tests|which tests|do you (?:have|offer)|available at (?:the )?clinic)\b/i.test(message);
 }
 
 function getZonedParts(date) {
@@ -151,10 +209,7 @@ function buildCandidateSlots(timeMin, timeMax) {
   for (let dayOffset = 0; dayOffset <= appointmentLookaheadDays; dayOffset += 1) {
     const date = addLocalDays(localDate, dayOffset);
     const noon = zonedDateTimeToUtc(date.year, date.month, date.day, 12, 0);
-    const weekdayName = new Intl.DateTimeFormat('en-US', {
-      timeZone,
-      weekday: 'short'
-    }).format(noon);
+    const weekdayName = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(noon);
     const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekdayName);
 
     if (weekday > 0 && weekday < 6) {
@@ -168,103 +223,248 @@ function buildCandidateSlots(timeMin, timeMax) {
         const start = zonedDateTimeToUtc(date.year, date.month, date.day, hour, minute);
         const end = new Date(start.getTime() + appointmentDurationMinutes * 60 * 1000);
 
-        if (start >= rangeStart && end <= rangeEnd) {
+        if (start >= rangeStart && start > new Date() && end <= rangeEnd) {
           slots.push({ start, end });
         }
       }
     }
   }
-
   return slots;
 }
 
 function overlaps(slot, busyPeriod) {
   return (
-    slot.start < new Date(busyPeriod.end) &&
-    slot.end > new Date(busyPeriod.start)
+    slot.start < new Date(busyPeriod.end) && slot.end > new Date(busyPeriod.start)
   );
 }
 
 function formatSlot(slot, index) {
-  const formatted = new Intl.DateTimeFormat('en', {
-    timeZone,
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  }).format(slot.start);
-  return `${index + 1}. ${formatted}`;
+  const parts = getZonedParts(slot.start);
+  const weekdayIndex = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(
+    new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(slot.start)
+  );
+  const weekdayNames = ['Itwaar', 'Peer', 'Mangal', 'Budh', 'Jumerat', 'Jumma', 'Hafta'];
+  const monthNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  const hour = parts.hour % 12 || 12;
+  const meridiem = parts.hour >= 12 ? 'PM' : 'AM';
+  const formatted = `${weekdayNames[weekdayIndex]}, ${parts.day} ${monthNames[parts.month - 1]} ${hour}:${String(parts.minute).padStart(2, '0')} ${meridiem}`;
+  return `${index + 1}. ${formatted} (${timeZone})`;
 }
 
-async function findAvailableSlots() {
-  const calendar = getCalendarClient();
-  const { timeMin, timeMax } = getTimeRange();
-  const freeBusy = await calendar.freebusy.query({
-    requestBody: {
-      timeMin,
-      timeMax,
-      timeZone,
-      items: [{ id: calendarId }]
-    }
+// Timeout wrap function taake Google API network hang hone par crash ya infinite timeout na ho
+async function executeWithTimeout(promiseFunction, timeoutMs = 10000) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error('Google Calendar API request timed out'));
+    }, timeoutMs);
   });
-  const calendarData = freeBusy.data.calendars?.[calendarId];
-  if (calendarData?.errors?.length) {
-    throw new Error('Google Calendar returned a free/busy error');
+
+  try {
+    const result = await Promise.race([promiseFunction(), timeoutPromise]);
+    clearTimeout(timeoutId);
+    return result;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
   }
-  const busyPeriods = calendarData?.busy || [];
+}
+
+async function getBusyPeriods(timeMin, timeMax, doctorProfile) {
+  const calendarId = doctorProfile.googleCalendarId || 'primary';
+  let freeBusy;
+  try {
+    const calendar = getCalendarClient(doctorProfile);
+    freeBusy = await executeWithTimeout(async () => {
+      return await calendar.freebusy.query({
+        requestBody: { timeMin, timeMax, timeZone, items: [{ id: calendarId }] }
+      });
+    }, 12000); // 12 seconds max timeout
+  } catch (error) {
+    throw new Error('Google Calendar free/busy query failed', { cause: error });
+  }
+
+  const calendarData = freeBusy.data?.calendars?.[calendarId];
+  if (!calendarData) {
+    throw new Error(`Google Calendar was not returned: ${calendarId}`);
+  }
+  if (calendarData.errors?.length) {
+    const calendarError = calendarData.errors
+      .map(({ domain, reason }) => [domain, reason].filter(Boolean).join(': '))
+      .join(', ');
+    throw new Error(`Google Calendar free/busy error: ${calendarError}`);
+  }
+
+  return { busyPeriods: Array.isArray(calendarData.busy) ? calendarData.busy : [] };
+}
+
+async function findAvailableSlots(requestedDate, doctorProfile) {
+  const { timeMin, timeMax } = getTimeRange(requestedDate);
+  const { busyPeriods } = await getBusyPeriods(timeMin, timeMax, doctorProfile);
 
   return buildCandidateSlots(timeMin, timeMax).filter(
     (slot) => !busyPeriods.some((busyPeriod) => overlaps(slot, busyPeriod))
   ).slice(0, 8);
 }
 
-async function bookAppointment(conversation, slot) {
-  const lockKey = `${slot.start.toISOString()}-${slot.end.toISOString()}`;
+function scheduleAppointmentReminder(doctorProfile, sender, slot, patientName) {
+  const reminderKey = `${doctorProfile.doctorId}:${sender}:${slot.start.toISOString()}`;
+  const reminderTime = new Date(slot.start.getTime() - 2 * 60 * 60 * 1000);
+  const delay = Math.max(0, reminderTime.getTime() - Date.now());
+
+  if (slot.start.getTime() > Date.now()) {
+    const previousTimer = activeReminders.get(reminderKey);
+    if (previousTimer) clearTimeout(previousTimer);
+    const timerId = setTimeout(async () => {
+      const socket = whatsappSockets.get(doctorProfile.doctorId);
+      const doctorIsActive = await Doctor.exists({ doctorId: doctorProfile.doctorId, isActive: true });
+      if (socket && doctorIsActive) {
+        try {
+          await socket.sendMessage(sender, {
+            text: `Reminder: Salam ${patientName}! Aap ki appointment aaj waqt par hai (${slot.start.toLocaleString('en-PK', { timeZone })}). Hum aap ke muntazir hain.`
+          });
+          console.log('Appointment reminder sent');
+        } catch (err) {
+          logServiceError('Appointment reminder', err, [], doctorProfile.doctorId);
+        }
+      }
+      activeReminders.delete(reminderKey);
+    }, delay);
+
+    activeReminders.set(reminderKey, timerId);
+    console.log(`Appointment reminder scheduled for ${reminderTime.toISOString()}`);
+  }
+}
+
+async function restoreAppointmentReminders(doctorProfile) {
+  const appointments = await Appointment.find({
+    doctorId: doctorProfile.doctorId,
+    status: 'booked',
+    slotStart: { $gt: new Date() }
+  }).lean();
+
+  for (const appointment of appointments) {
+    scheduleAppointmentReminder(
+      doctorProfile,
+      appointment.senderJid,
+      { start: appointment.slotStart, end: appointment.slotEnd },
+      appointment.details.name
+    );
+  }
+}
+
+async function bookAppointment(conversation, slot, doctorProfile) {
+  const doctorId = doctorProfile.doctorId;
+  const lockKey = `${doctorId}:${slot.start.toISOString()}-${slot.end.toISOString()}`;
   const previousLock = bookingLocks.get(lockKey) || Promise.resolve();
   let releaseLock;
-  const currentLock = new Promise((resolve) => { releaseLock = resolve; });
+  const currentLock = new Promise((resolve) => {
+    releaseLock = resolve;
+  });
   const lockChain = previousLock.then(() => currentLock);
   bookingLocks.set(lockKey, lockChain);
 
   await previousLock;
+  let reservation;
+  let calendarEvent;
+  let calendarInsertStarted = false;
   try {
-  const calendar = getCalendarClient();
-  const { timeMin, timeMax } = getTimeRange();
-  const freeBusy = await calendar.freebusy.query({
-    requestBody: {
-      timeMin,
-      timeMax,
-      timeZone,
-      items: [{ id: calendarId }]
+    if (slot.start <= new Date()) return false;
+
+    const existingReservation = await Appointment.findOne({ doctorId, slotKey: lockKey });
+    if (existingReservation?.status === 'pending' && existingReservation.expiresAt <= new Date()) {
+      await Appointment.deleteOne({ _id: existingReservation._id, doctorId, status: 'pending' });
+    } else if (existingReservation) {
+      return false;
     }
-  });
-  const calendarData = freeBusy.data.calendars?.[calendarId];
-  if (calendarData?.errors?.length) {
-    throw new Error('Google Calendar returned a free/busy error');
-  }
-  const busyPeriods = calendarData?.busy || [];
 
-  if (busyPeriods.some((busyPeriod) => overlaps(slot, busyPeriod))) {
-    return false;
-  }
-
-  await calendar.events.insert({
-    calendarId,
-    sendUpdates: 'all',
-    requestBody: {
-      summary: `Patient appointment: ${conversation.details.name}`,
-      description: [
-        `Name: ${conversation.details.name}`,
-        `Contact: ${conversation.details.contactNumber}`,
-        `Symptoms: ${conversation.details.majorSymptoms}`
-      ].join('\n'),
-      start: { dateTime: slot.start.toISOString(), timeZone },
-      end: { dateTime: slot.end.toISOString(), timeZone }
+    try {
+      reservation = await Appointment.create({
+        doctorId,
+        clinicId: doctorId,
+        slotKey: lockKey,
+        senderJid: conversation.senderJid,
+        details: conversation.details,
+        slotStart: slot.start,
+        slotEnd: slot.end,
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 2 * 60 * 1000)
+      });
+    } catch (error) {
+      if (error.code === 11000) return false;
+      throw error;
     }
-  });
 
-  return true;
+    const calendar = getCalendarClient(doctorProfile);
+    const doctorCalendarId = doctorProfile.googleCalendarId || 'primary';
+    const { timeMin, timeMax } = getTimeRange(getLocalDateParts(slot.start, timeZone));
+    const { busyPeriods } = await getBusyPeriods(timeMin, timeMax, doctorProfile);
+
+    if (busyPeriods.some((busyPeriod) => overlaps(slot, busyPeriod))) {
+      await Appointment.deleteOne({ _id: reservation._id, doctorId });
+      return false;
+    }
+    if (!await Doctor.exists({ doctorId, isActive: true })) {
+      await Appointment.deleteOne({ _id: reservation._id, doctorId });
+      return false;
+    }
+
+    calendarInsertStarted = true;
+    try {
+      calendarEvent = await executeWithTimeout(async () => {
+        return await calendar.events.insert({
+          calendarId: doctorCalendarId,
+          sendUpdates: 'all',
+          requestBody: {
+            id: crypto.createHash('sha256').update(`${doctorId}:${doctorCalendarId}:${lockKey}`).digest('hex'),
+            summary: `Patient appointment: ${conversation.details.name}`,
+            description: [
+              `Name: ${conversation.details.name}`,
+              `Contact: ${conversation.details.contactNumber}`,
+              `Symptoms: ${conversation.details.majorSymptoms}`
+            ].join('\n'),
+            start: { dateTime: slot.start.toISOString(), timeZone },
+            end: { dateTime: slot.end.toISOString(), timeZone }
+          }
+        });
+      }, 12000);
+    } catch (error) {
+      if (error.code === 409 || error.response?.status === 409) {
+        await Appointment.deleteOne({ _id: reservation._id, doctorId });
+        return false;
+      }
+      throw error;
+    }
+
+    if (!await Doctor.exists({ doctorId, isActive: true })) {
+      try {
+        await calendar.events.delete({
+          calendarId: doctorCalendarId,
+          eventId: calendarEvent.data.id
+        });
+      } catch (error) {
+        logServiceError('Calendar booking cancellation', error, Object.values(conversation.details), doctorId);
+      }
+      await Appointment.deleteOne({ _id: reservation._id, doctorId });
+      return false;
+    }
+
+    await Appointment.updateOne(
+      { _id: reservation._id, doctorId },
+      { $set: { status: 'booked', bookedAt: new Date(), calendarEventId: calendarEvent.data.id }, $unset: { expiresAt: 1 } },
+      { runValidators: true }
+    );
+
+    scheduleAppointmentReminder(doctorProfile, conversation.senderJid, slot, conversation.details.name);
+    return true;
+  } catch (error) {
+    if (reservation && !calendarEvent && !calendarInsertStarted) {
+      await Appointment.deleteOne({ _id: reservation._id, doctorId });
+    }
+    throw error;
   } finally {
     releaseLock();
     if (bookingLocks.get(lockKey) === lockChain) bookingLocks.delete(lockKey);
@@ -275,172 +475,369 @@ function validatePatientInput(step, value) {
   if (value.length === 0 || value.length > maxInputLength) return false;
   if (step === 'name') return value.length <= maxNameLength && /^[\p{L} .'-]+$/u.test(value);
   if (step === 'contactNumber') {
-    return value.length <= maxPhoneLength && /^\+?[0-9][0-9 ()-]{6,28}$/.test(value);
+    return value.length <= maxPhoneLength && /^\+?[0-9 ()-]{6,28}$/.test(value);
   }
   return value.length <= maxSymptomsLength;
 }
 
-function saveCalendarRetry(sender, conversation) {
+async function saveCalendarRetry(sender, conversation, doctorId) {
   conversation.step = 'calendarSelection';
   conversation.slots = [];
   conversation.updatedAt = Date.now();
-  conversations.set(sender, conversation);
+  await saveConversation(sender, conversation, doctorId);
 }
 
-async function handleConversationMessage(sender, message) {
+async function handleConversationMessage(sender, message, doctorProfile) {
   const normalizedMessage = message.trim();
+  doctorProfile = await Doctor.findOne({ doctorId: doctorProfile.doctorId, isActive: true })
+    .select('+googleCredentialsEncrypted').lean();
+  if (!doctorProfile) return null;
+  const targetDoctorId = doctorProfile.doctorId;
+
+  const welcomeMessage = () => getWelcomeMessage(normalizedMessage, doctorProfile);
 
   if (/^(restart|start over)$/i.test(normalizedMessage)) {
-    conversations.delete(sender);
-    return 'Of course. May I start with your name?';
+    await deleteConversation(sender, targetDoctorId);
+    const restartedConversation = {
+      step: 'name',
+      details: {},
+      senderJid: sender,
+      updatedAt: Date.now()
+    };
+    await saveConversation(sender, restartedConversation, targetDoctorId);
+    return welcomeMessage();
   }
 
-  let conversation = conversations.get(sender);
+  let conversation = await getConversation(sender, targetDoctorId);
   if (conversation && Date.now() - conversation.updatedAt > conversationTtlMs) {
-    conversations.delete(sender);
+    await deleteConversation(sender, targetDoctorId);
     conversation = undefined;
   }
-  conversation = conversation || {
-    step: 'name',
-    details: {},
-    updatedAt: Date.now()
-  };
+  if (!conversation) {
+    conversation = { step: 'name', details: {}, senderJid: sender, updatedAt: Date.now() };
+    await saveConversation(sender, conversation, targetDoctorId);
+    return welcomeMessage();
+  }
+  conversation.senderJid = sender;
+
+  if (isGreeting(normalizedMessage)) return welcomeMessage();
+  if (isFacilityQuestion(normalizedMessage)) {
+    return `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein ${doctorProfile.facilitiesList.join(', ')} ki sahuliyaat mojood hain.`;
+  }
+
   if (conversation.step === 'calendarSelection') {
     if (!conversation.slots?.length) {
       try {
-        const availableSlots = await findAvailableSlots();
-        if (!availableSlots.length) return 'I am sorry, there are no available appointments right now.';
+        const availableSlots = await findAvailableSlots(conversation.requestedDate, doctorProfile);
+        if (!availableSlots.length) {
+          conversation.step = 'appointmentDate';
+          conversation.requestedDate = undefined;
+          await saveConversation(sender, conversation, targetDoctorId);
+          return 'Maazrat, us tareekh ko koi waqt dastiyab nahi. Meherbani karke doosri tareekh batayein.';
+        }
         conversation.slots = availableSlots;
         conversation.updatedAt = Date.now();
-        conversations.set(sender, conversation);
-        return 'Please choose a time:\n' + availableSlots.map(formatSlot).join('\n');
+        await saveConversation(sender, conversation, targetDoctorId);
+        return 'Meherbani karke neeche diye gaye auqaat mein se ek muntakhib karein:\n' +
+          availableSlots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
       } catch (error) {
-        console.error('Calendar availability error:', error);
-        return 'I am still having trouble checking times. Please reply again shortly.';
+        logServiceError('Calendar availability', error, [], targetDoctorId);
+        return 'Maazrat, waqt check karne mein mushkil aa rahi hai. Meherbani karke thori dair baad dobara reply karein.';
       }
     }
 
-    if (!/^\d+$/.test(normalizedMessage)) {
-      return 'Please reply with the number of one of the slots listed above.';
+    let selectedSlotNumber = /^\d+$/.test(normalizedMessage) ? Number(normalizedMessage) : null;
+    if (selectedSlotNumber === null) {
+      if (normalizedMessage.length > maxInputLength) {
+        return 'Meherbani karke upar diye gaye kisi slot ka number ya waqt reply karein.';
+      }
+      try {
+        selectedSlotNumber = await extractSlotNumber(normalizedMessage, conversation.slots, formatSlot, doctorProfile);
+      } catch (error) {
+        logServiceError('Gemini appointment selection', error, [], targetDoctorId);
+      }
     }
-    const selectedIndex = Number(normalizedMessage) - 1;
+    if (!Number.isInteger(selectedSlotNumber) || selectedSlotNumber < 1) {
+      return 'Meherbani karke upar diye gaye kisi slot ka number ya waqt reply karein.';
+    }
+    const selectedIndex = selectedSlotNumber - 1;
     const selectedSlot = conversation.slots?.[selectedIndex];
 
     if (!selectedSlot) {
-      return 'Please reply with the number of one of the slots listed above.';
+      return 'Yeh slot number durust nahi hai. Meherbani karke upar diye gaye kisi slot ka number reply karein.';
     }
 
-    const booked = await bookAppointment(conversation, {
-      start: new Date(selectedSlot.start),
-      end: new Date(selectedSlot.end)
-    });
+    let booked;
+    try {
+      booked = await bookAppointment(conversation, {
+        start: new Date(selectedSlot.start),
+        end: new Date(selectedSlot.end)
+      }, doctorProfile);
+    } catch (error) {
+      logServiceError('Calendar booking', error, Object.values(conversation.details), targetDoctorId);
+      await saveCalendarRetry(sender, conversation, targetDoctorId);
+      return 'Maazrat, appointment save karne mein mushkil aa gayi. Meherbani karke thori dair baad dobara reply karein.';
+    }
 
     if (!booked) {
       try {
         conversation.step = 'calendarSelection';
-        conversation.slots = await findAvailableSlots();
+        conversation.slots = await findAvailableSlots(conversation.requestedDate, doctorProfile);
         if (!conversation.slots.length) {
-          conversations.delete(sender);
-          return 'That slot was just taken, and there are no other times available right now.';
+          await deleteConversation(sender, targetDoctorId);
+          return 'Maazrat, woh waqt abhi kisi aur ne le liya hai aur is waqt koi doosra waqt dastiyab nahi hai.';
         }
         conversation.updatedAt = Date.now();
-        conversations.set(sender, conversation);
-        return 'That slot was just taken. Please choose another:\n' +
-          conversation.slots.map(formatSlot).join('\n');
+        await saveConversation(sender, conversation, targetDoctorId);
+        return 'Maazrat, woh waqt abhi kisi aur ne le liya hai. Meherbani karke doosra waqt muntakhib karein:\n' +
+          conversation.slots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
       } catch (error) {
-        console.error('Calendar refresh error:', error);
-        saveCalendarRetry(sender, conversation);
-        return 'That slot was just taken. I am having trouble refreshing times. Please reply again shortly.';
+        logServiceError('Calendar refresh', error, [], targetDoctorId);
+        await saveCalendarRetry(sender, conversation, targetDoctorId);
+        return 'Woh waqt abhi kisi aur ne le liya hai. Auqaat dobara check karne mein mushkil aa rahi hai; meherbani karke thori dair baad reply karein.';
       }
     }
 
-    conversations.delete(sender);
-    return 'You are booked. We look forward to seeing you soon.';
+    await deleteConversation(sender, targetDoctorId);
+    return 'Aap ki appointment kamyabi se book ho gayi hai. Hum jald aap se mulaqat ke muntazir hain.';
+  }
+
+  if (conversation.step === 'appointmentDate') {
+    if (normalizedMessage.length > maxInputLength) {
+      return `Meherbani karke ${maxInputLength} characters se chhoti tareekh bhejein.`;
+    }
+    const requestedDate = parseRequestedDate(normalizedMessage, timeZone, appointmentLookaheadDays);
+    if (!requestedDate) {
+      return `Maazrat, tareekh samajh nahi aayi. Aaj se agle ${appointmentLookaheadDays} din ke andar koi tareekh batayein, misal: kal ya next Friday.`;
+    }
+
+    conversation.requestedDate = `${requestedDate.year}-${String(requestedDate.month).padStart(2, '0')}-${String(requestedDate.day).padStart(2, '0')}`;
+    let availableSlots;
+    try {
+      availableSlots = await findAvailableSlots(conversation.requestedDate, doctorProfile);
+    } catch (error) {
+      logServiceError('Calendar availability', error, [], targetDoctorId);
+      await saveConversation(sender, conversation, targetDoctorId);
+      return 'Maazrat, waqt check karne mein mushkil aa rahi hai. Meherbani karke thori dair baad dobara reply karein.';
+    }
+
+    if (availableSlots.length === 0) {
+      conversation.requestedDate = undefined;
+      await saveConversation(sender, conversation, targetDoctorId);
+      return 'Maazrat, us tareekh ko koi waqt dastiyab nahi. Meherbani karke doosri tareekh batayein.';
+    }
+
+    conversation.step = 'calendarSelection';
+    conversation.slots = availableSlots;
+    conversation.updatedAt = Date.now();
+    await saveConversation(sender, conversation, targetDoctorId);
+    return `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein is tareekh ke dastiyab auqaat yeh hain:\n` +
+      availableSlots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
   }
 
   const currentStep = conversationSteps[conversation.step];
+  let extractedValue;
+  if (normalizedMessage.length > 0 && normalizedMessage.length <= maxInputLength) {
+    try {
+      extractedValue = await extractPatientField(conversation.step, normalizedMessage, doctorProfile);
+    } catch (error) {
+      logServiceError('Gemini field extraction', error, [], targetDoctorId);
+    }
+  }
+  const patientValue = extractedValue && validatePatientInput(conversation.step, extractedValue)
+    ? extractedValue
+    : normalizedMessage;
 
-  if (!validatePatientInput(conversation.step, normalizedMessage)) {
-    if (conversation.step === 'name') return 'Please share your name using letters only (up to 100 characters).';
-    if (conversation.step === 'contactNumber') return 'Please share a valid phone number, including country code if possible.';
-    return 'Please keep your symptom description under 500 characters.';
+  if (!validatePatientInput(conversation.step, patientValue)) {
+    if (conversation.step === 'name') return 'Meherbani karke sirf huroof mein apna naam batayein (zyada se zyada 100 huroof).';
+    if (conversation.step === 'contactNumber') return 'Meherbani karke durust phone number batayein, mumkin ho to country code ke saath.';
+    return 'Meherbani karke alamat ki tafseel 500 characters se kam rakhein.';
   }
 
-  conversation.details[conversation.step] = normalizedMessage;
+  conversation.details[conversation.step] = patientValue;
   conversation.step = currentStep.next;
   conversation.updatedAt = Date.now();
 
   if (conversation.step === 'calendarSelection') {
     let availableSlots;
     try {
-      availableSlots = await findAvailableSlots();
+      availableSlots = await findAvailableSlots(undefined, doctorProfile);
     } catch (error) {
-      console.error('Calendar availability error:', error);
-      saveCalendarRetry(sender, conversation);
-      return 'I am having trouble checking times right now. Please reply again shortly.';
+      logServiceError('Calendar availability', error, [], targetDoctorId);
+      await saveCalendarRetry(sender, conversation, targetDoctorId);
+      return 'Maazrat, waqt check karne mein mushkil aa rahi hai. Meherbani karke thori dair baad dobara reply karein.';
     }
 
     if (availableSlots.length === 0) {
-      conversations.delete(sender);
-      return 'I am sorry, there are no available appointments right now. Our team will be in touch.';
+      await deleteConversation(sender, targetDoctorId);
+      return 'Maazrat, is waqt koi appointment ka waqt dastiyab nahi hai. Hamari team aap se rabta karegi.';
     }
 
     conversation.slots = availableSlots;
-    conversations.set(sender, conversation);
-    return 'Thanks, ' + conversation.details.name + '. Please choose a time:\n' +
-      availableSlots.map(formatSlot).join('\n');
+    await saveConversation(sender, conversation, targetDoctorId);
+    return 'Shukriya, ' + conversation.details.name + '. Neeche diye gaye auqaat mein se ek muntakhib karein:\n' +
+      availableSlots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
   }
 
-  conversations.set(sender, conversation);
-
-  return currentStep.reply.replace('{name}', conversation.details.name || normalizedMessage);
+  await saveConversation(sender, conversation, targetDoctorId);
+  return currentStep.reply.replace('{name}', conversation.details.name || patientValue);
 }
 
-app.post('/webhooks/whatsapp', async (request, response) => {
-  if (!isValidTwilioRequest(request)) {
-    return response.status(403).json({ error: 'Invalid webhook signature' });
-  }
+async function handleConversationMessageSerially(sender, message, doctorProfile) {
+  const lockKey = `${doctorProfile.doctorId}:${sender}`;
+  const previousLock = conversationLocks.get(lockKey) || Promise.resolve();
+  let releaseLock;
+  const currentLock = new Promise((resolve) => {
+    releaseLock = resolve;
+  });
+  const lockChain = previousLock.then(() => currentLock);
+  conversationLocks.set(lockKey, lockChain);
 
-  const incomingMessage = request.body.Body?.trim();
-  const sender = request.body.From;
-
-  if (!incomingMessage || !sender) {
-    return response.status(400).json({ error: 'Body and From are required' });
-  }
-
-  console.log(`WhatsApp message received from ${sender}`);
-
-  const twiml = new twilio.twiml.MessagingResponse();
+  await previousLock;
   try {
-    twiml.message(await handleConversationMessage(sender, incomingMessage));
-  } catch (error) {
-    console.error('WhatsApp conversation error:', error);
-    twiml.message('I am sorry, I cannot check appointments right now. Please try again shortly.');
+    return await handleConversationMessage(sender, message, doctorProfile);
+  } finally {
+    releaseLock();
+    if (conversationLocks.get(lockKey) === lockChain) conversationLocks.delete(lockKey);
   }
-
-  return response.type('text/xml').send(twiml.toString());
-});
-// Google Sheet mein appointment save karne ka function
-async function saveAppointmentToSheet(patientData) {
-    const googleScriptURL = 'YAHAN_APNA_WOH_COPIED_URL_PASTE_KAREIN'; // Isko hata kar apna Google Web App URL yahan daalein
-    
-    try {
-        const response = await axios.post(googleScriptURL, {
-            name: patientData.name,
-            phone: patientData.phone,
-            date: patientData.date,
-            time: patientData.time,
-            symptoms: patientData.symptoms
-        });
-        console.log('Appointment saved to Google Sheet successfully:', response.data);
-    } catch (error) {
-        console.error('Error saving to sheet:', error);
-    }
 }
+
 app.use((_request, response) => {
   response.status(404).json({ error: 'Not found' });
 });
 
-app.listen(port, () => {
-  console.log(`Doctor receptionist webhook listening on port ${port}`);
-});
+async function startDoctorWhatsApp(doctorProfile) {
+  if (!doctorProfile.isActive || whatsappSockets.has(doctorProfile.doctorId) || startingDoctorIds.has(doctorProfile.doctorId)) return;
+  startingDoctorIds.add(doctorProfile.doctorId);
+
+  const configuredAuthDirectory = process.env.BAILEYS_AUTH_DIR || 'auth_info_baileys';
+  const authDirectory = path.join(configuredAuthDirectory, doctorProfile.doctorId);
+  let socket;
+  let saveCreds;
+  try {
+    if (!await Doctor.exists({ doctorId: doctorProfile.doctorId, isActive: true })) return;
+    const authState = await useMultiFileAuthState(authDirectory);
+    saveCreds = authState.saveCreds;
+    socket = makeWASocket({
+      auth: authState.state,
+      browser: ['Doctor Receptionist', 'Chrome', '1.0.0'],
+      markOnlineOnConnect: false,
+      syncFullHistory: false
+    });
+    whatsappSockets.set(doctorProfile.doctorId, socket);
+  } finally {
+    startingDoctorIds.delete(doctorProfile.doctorId);
+  }
+
+  socket.ev.on('creds.update', saveCreds);
+  socket.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      console.log(`Scan WhatsApp QR for doctor ${doctorProfile.doctorId}.`);
+      qrcode.generate(qr, { small: true });
+    }
+    if (connection === 'open') {
+      console.log(`WhatsApp connection ready for doctor ${doctorProfile.doctorId}.`);
+      restoreAppointmentReminders(doctorProfile).catch((error) =>
+        logServiceError('Reminder restoration', error, [], doctorProfile.doctorId));
+    }
+    if (connection === 'close') {
+      if (whatsappSockets.get(doctorProfile.doctorId) === socket) {
+        whatsappSockets.delete(doctorProfile.doctorId);
+      }
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      if (statusCode !== DisconnectReason.loggedOut) {
+        console.log(`WhatsApp connection closed for doctor ${doctorProfile.doctorId}; reconnecting.`);
+        setTimeout(() => startDoctorWhatsApp(doctorProfile).catch((error) =>
+          logServiceError('WhatsApp reconnect', error, [], doctorProfile.doctorId)), 3000).unref();
+      } else {
+        console.error(`WhatsApp logged out for doctor ${doctorProfile.doctorId}. Re-link that clinic's number.`);
+      }
+    }
+  });
+
+  socket.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const message of messages) {
+      const sender = message.key.remoteJid;
+      const incomingMessage = message.message?.conversation ||
+        message.message?.extendedTextMessage?.text;
+
+      if (message.key.fromMe || !sender || sender.endsWith('@g.us') || !incomingMessage) {
+        continue;
+      }
+
+      let reply;
+      try {
+        reply = await handleConversationMessageSerially(sender, incomingMessage, doctorProfile);
+      } catch (error) {
+        logServiceError('WhatsApp conversation', error, [], doctorProfile.doctorId);
+        reply = 'Maazrat, appointment check karne mein mushkil aa rahi hai. Meherbani karke thori dair baad dobara reply karein.';
+      }
+
+      if (!reply) continue;
+
+      try {
+        await socket.sendMessage(sender, { text: reply });
+      } catch (error) {
+        logServiceError('WhatsApp reply', error, [], doctorProfile.doctorId);
+      }
+    }
+  });
+}
+
+const doctorReportTasks = new Map();
+
+async function synchronizeDoctorWorkers() {
+  const activeDoctors = await Doctor.find({ isActive: true }).select('+googleCredentialsEncrypted').lean();
+  const activeDoctorIds = new Set(activeDoctors.map(({ doctorId: activeDoctorId }) => activeDoctorId));
+
+  for (const [connectedDoctorId, socket] of whatsappSockets) {
+    if (!activeDoctorIds.has(connectedDoctorId)) {
+      whatsappSockets.delete(connectedDoctorId);
+      socket.end(new Error('Doctor account deactivated'));
+      const reportTask = doctorReportTasks.get(connectedDoctorId);
+      if (reportTask) reportTask.stop();
+      doctorReportTasks.delete(connectedDoctorId);
+    }
+  }
+
+  for (const doctorProfile of activeDoctors) {
+    if (!whatsappSockets.has(doctorProfile.doctorId)) {
+      startDoctorWhatsApp(doctorProfile).catch((error) =>
+        logServiceError('WhatsApp startup', error, [], doctorProfile.doctorId));
+    }
+    if (!doctorReportTasks.has(doctorProfile.doctorId)) {
+      try {
+        const reportTask = startDailyReport(doctorProfile);
+        if (reportTask) doctorReportTasks.set(doctorProfile.doctorId, reportTask);
+      } catch (error) {
+        logServiceError('Daily report scheduler startup', error, [], doctorProfile.doctorId);
+      }
+    }
+  }
+}
+
+function startDoctorWorkerSynchronization() {
+  synchronizeDoctorWorkers().catch((error) => logServiceError('Doctor worker sync', error));
+  const interval = setInterval(() => {
+    synchronizeDoctorWorkers().catch((error) => logServiceError('Doctor worker sync', error));
+  }, 30_000);
+  interval.unref();
+}
+
+async function startServer() {
+    try {
+        await connectDatabase(process.env.MONGODB_URI, clinicId, doctorId);
+
+        app.listen(port, () => {
+            console.log(`Doctor receptionist health server listening on port ${port}`);
+            startDoctorWorkerSynchronization();
+        });
+    } catch (error) {
+        logServiceError('Server startup', error);
+    }
+}
+
+// Function ko call karna zaroori hai taake server start ho
+startServer();

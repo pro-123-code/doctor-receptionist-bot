@@ -1,0 +1,19 @@
+{
+  "id": "/dashboard",
+  "name": "DoctorBot Clinic Dashboard",
+  "short_name": "DoctorBot",
+  "description": "Clinic appointments and account administration",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f3f7f5",
+  "theme_color": "#176b5b",
+  "icons": [
+    {
+      "src": "/dashboard-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

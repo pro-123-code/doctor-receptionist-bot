@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <meta name="theme-color" content="#176b5b">
+  <link rel="manifest" href="/dashboard.webmanifest">
+  <link rel="icon" href="/dashboard-icon.svg" type="image/svg+xml">
+  <title>DoctorBot Dashboard</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta23/dist/css/tabler.min.css">
+  <style>
+    :root { color-scheme: light; }
+    body { background: #f3f7f5; }
+    .clinic-bar { background: #176b5b; color: #fff; }
+    .clinic-mark { color: #176b5b; }
+    .login-wrap { max-width: 440px; margin: 9vh auto; }
+    .table td { vertical-align: top; }
+    .symptoms { min-width: 220px; max-width: 460px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #notice[hidden], #dashboard[hidden], #login[hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <header class="navbar navbar-expand-md clinic-bar">
+    <div class="container-xl">
+      <span id="brand" class="navbar-brand text-white">DoctorBot</span>
+      <div class="navbar-nav flex-row order-md-last">
+        <button id="logout" class="btn btn-outline-light btn-sm" type="button" hidden>Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container-xl py-4">
+    <div id="notice" class="alert alert-danger" role="alert" hidden></div>
+
+    <section id="login" class="login-wrap" aria-labelledby="login-title">
+      <div class="card">
+        <div class="card-body p-4">
+          <div class="clinic-mark fw-bold mb-2">CLINIC DASHBOARD</div>
+          <h1 id="login-title" class="h2">Sign in</h1>
+          <p class="text-secondary">View appointments booked for your clinic.</p>
+          <form id="login-form">
+            <label class="form-label" for="email">Email</label>
+            <input id="email" class="form-control mb-3" type="email" autocomplete="username" required>
+            <label class="form-label" for="password">Password</label>
+            <input id="password" class="form-control mb-3" type="password" autocomplete="current-password" required>
+            <button class="btn btn-primary w-100" type="submit">Sign in</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <section id="doctor-dashboard" hidden>
+      <div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-4">
+        <div>
+          <div class="clinic-mark fw-bold">DAILY SCHEDULE</div>
+          <h1 class="h2 mb-0">Appointments</h1>
+        </div>
+        <div class="d-flex flex-wrap align-items-end gap-3">
+          <form id="date-form" class="d-flex align-items-end gap-2">
+            <div>
+              <label class="form-label" for="report-date">Clinic date</label>
+              <input id="report-date" class="form-control" type="date" required>
+            </div>
+            <button class="btn btn-primary" type="submit">View</button>
+          </form>
+          <div>
+            <p id="calendar-connection-status" class="text-secondary mb-1" aria-live="polite"></p>
+            <a id="connect-calendar" class="btn btn-outline-primary" href="/api/auth/google" hidden>Connect Google Calendar</a>
+            <p id="calendar-oauth-setup" class="form-hint mt-2 mb-0" hidden>Calendar connection needs Google OAuth credentials, a registered redirect URI, and a valid credential-encryption key.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="d-flex align-items-center justify-content-between border-bottom pb-2 mb-3">
+        <p id="result-count" class="text-secondary mb-0" aria-live="polite"></p>
+        <button id="refresh" class="btn btn-outline-secondary btn-sm" type="button">Refresh</button>
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-vcenter table-striped">
+          <thead>
+            <tr><th>Patient Name</th><th>WhatsApp Number</th><th>Symptoms</th><th>Appointment Slot</th></tr>
+          </thead>
+          <tbody id="appointments"></tbody>
+        </table>
+      </div>
+      <p id="empty-state" class="text-secondary py-4" hidden>No appointments booked for this date.</p>
+
+      <section class="mt-5" aria-labelledby="settings-title">
+        <h2 id="settings-title" class="h3">Bot settings</h2>
+        <form id="doctor-settings-form" class="row g-3 mb-4">
+          <div class="col-sm-6"><label class="form-label" for="profile-doctor-name">Doctor name</label><input id="profile-doctor-name" class="form-control" required maxlength="120"></div>
+          <div class="col-sm-6"><label class="form-label" for="profile-clinic-name">Clinic name</label><input id="profile-clinic-name" class="form-control" required maxlength="160"></div>
+          <div class="col-sm-6"><label class="form-label" for="profile-facilities">Facilities (one per line)</label><textarea id="profile-facilities" class="form-control" rows="4" required></textarea></div>
+          <div class="col-sm-6"><label class="form-label" for="profile-welcome">Welcome message</label><textarea id="profile-welcome" class="form-control" rows="4" maxlength="1000"></textarea></div>
+          <div class="col-12"><button class="btn btn-primary" type="submit">Save bot settings</button></div>
+        </form>
+      </section>
+    </section>
+
+    <section id="admin-dashboard" hidden>
+      <div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-4">
+        <div>
+          <div class="clinic-mark fw-bold">SUPERADMIN</div>
+          <h1 class="h2 mb-0">Doctor accounts</h1>
+        </div>
+        <button id="admin-refresh" class="btn btn-outline-secondary" type="button">Refresh</button>
+      </div>
+
+      <div class="table-responsive mb-5">
+        <table class="table table-vcenter table-striped">
+          <thead>
+            <tr><th>Doctor</th><th>Clinic</th><th>Email</th><th>Total</th><th>Upcoming</th><th>Status</th><th>Access</th></tr>
+          </thead>
+          <tbody id="doctor-accounts"></tbody>
+        </table>
+      </div>
+
+      <section aria-labelledby="create-doctor-title">
+        <h2 id="create-doctor-title" class="h3">Add a doctor</h2>
+        <form id="create-doctor-form" class="row g-3">
+          <div class="col-sm-6"><label class="form-label" for="doctor-name">Doctor name</label><input id="doctor-name" name="doctorName" class="form-control" required maxlength="120"></div>
+          <div class="col-sm-6"><label class="form-label" for="clinic-name">Clinic name</label><input id="clinic-name" name="clinicName" class="form-control" required maxlength="160"></div>
+          <div class="col-sm-6"><label class="form-label" for="doctor-email">Login email</label><input id="doctor-email" name="email" class="form-control" type="email" required></div>
+          <div class="col-sm-6"><label class="form-label" for="doctor-password">Temporary password (12+ characters)</label><input id="doctor-password" name="password" class="form-control" type="password" minlength="12" required autocomplete="new-password"></div>
+          <div class="col-sm-6"><label class="form-label" for="doctor-facilities">Facilities (one per line)</label><textarea id="doctor-facilities" name="facilitiesList" class="form-control" rows="4" required></textarea></div>
+          <div class="col-sm-6"><label class="form-label" for="doctor-welcome">Welcome message</label><textarea id="doctor-welcome" name="welcomeMessage" class="form-control" rows="4" maxlength="1000"></textarea></div>
+          <div class="col-12"><button class="btn btn-primary" type="submit">Create doctor account</button></div>
+        </form>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const loginSection = document.querySelector('#login');
+    const dashboardSection = document.querySelector('#doctor-dashboard');
+    const adminSection = document.querySelector('#admin-dashboard');
+    const notice = document.querySelector('#notice');
+    const rows = document.querySelector('#appointments');
+    const dateInput = document.querySelector('#report-date');
+    const count = document.querySelector('#result-count');
+    const emptyState = document.querySelector('#empty-state');
+    const logoutButton = document.querySelector('#logout');
+    const doctorRows = document.querySelector('#doctor-accounts');
+
+    function showError(message) {
+      notice.textContent = message;
+      notice.hidden = false;
+    }
+
+    function showDashboard(session) {
+      notice.hidden = true;
+      loginSection.hidden = true;
+      dashboardSection.hidden = session.role !== 'DOCTOR';
+      adminSection.hidden = session.role !== 'SUPERADMIN';
+      logoutButton.hidden = false;
+      const brand = session.role === 'DOCTOR'
+        ? `${session.doctorName || 'Doctor'} | ${session.clinicName || 'Clinic'}`
+        : 'DoctorBot | Superadmin';
+      document.querySelector('#brand').textContent = brand;
+      document.title = `${brand} Dashboard`;
+      if (session.role === 'DOCTOR') {
+        loadAppointments().catch((error) => showError(error.message));
+        loadDoctorSettings().catch((error) => showError(error.message));
+      } else if (session.role === 'SUPERADMIN') {
+        loadDoctors().catch((error) => showError(error.message));
+      }
+    }
+
+    async function loadAppointments() {
+      notice.hidden = true;
+      rows.replaceChildren();
+      const query = dateInput.value ? `?date=${encodeURIComponent(dateInput.value)}` : '';
+      const response = await fetch(`/api/dashboard/appointments${query}`, { credentials: 'same-origin' });
+      if (response.status === 401) {
+        loginSection.hidden = false;
+        dashboardSection.hidden = true;
+        adminSection.hidden = true;
+        logoutButton.hidden = true;
+        return;
+      }
+      if (!response.ok) throw new Error('Could not load appointments. Please try again.');
+
+      const data = await response.json();
+      dateInput.value = data.date;
+      count.textContent = `${data.appointments.length} appointment${data.appointments.length === 1 ? '' : 's'}`;
+      emptyState.hidden = data.appointments.length > 0;
+      const slotStartFormatter = new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+        timeZone: data.timeZone
+      });
+      const slotEndFormatter = new Intl.DateTimeFormat(undefined, {
+        timeStyle: 'short',
+        timeZone: data.timeZone
+      });
+      for (const appointment of data.appointments) {
+        const row = document.createElement('tr');
+        const values = [
+          appointment.patientName,
+          appointment.whatsAppNumber,
+          appointment.symptoms,
+          `${slotStartFormatter.format(new Date(appointment.slotStart))} - ${slotEndFormatter.format(new Date(appointment.slotEnd))} (${data.timeZone})`
+        ];
+        values.forEach((value, index) => {
+          const cell = document.createElement('td');
+          cell.textContent = value || '';
+          if (index === 2) cell.className = 'symptoms';
+          row.append(cell);
+        });
+        rows.append(row);
+      }
+    }
+
+    async function loadDoctorSettings() {
+      const response = await fetch('/api/dashboard/settings', { credentials: 'same-origin' });
+      if (!response.ok) throw new Error('Could not load clinic settings.');
+      const settings = await response.json();
+      document.querySelector('#profile-doctor-name').value = settings.doctorName;
+      document.querySelector('#profile-clinic-name').value = settings.clinicName;
+      document.querySelector('#profile-facilities').value = settings.facilitiesList.join('\n');
+      document.querySelector('#profile-welcome').value = settings.welcomeMessage || '';
+      document.querySelector('#calendar-connection-status').textContent = settings.googleCalendarConnected
+        ? `Connected to ${settings.googleCalendarId}`
+        : 'Not connected';
+      document.querySelector('#connect-calendar').textContent = settings.googleCalendarConnected
+        ? 'Reconnect Google Calendar'
+        : 'Connect Google Calendar';
+      const connectCalendar = document.querySelector('#connect-calendar');
+      const oauthSetup = document.querySelector('#calendar-oauth-setup');
+      connectCalendar.hidden = !settings.calendarOAuthAvailable;
+      oauthSetup.hidden = settings.calendarOAuthAvailable;
+    }
+
+    async function loadDoctors() {
+      const response = await fetch('/api/admin/doctors', { credentials: 'same-origin' });
+      if (!response.ok) throw new Error('Could not load doctor accounts.');
+      const { doctors } = await response.json();
+      doctorRows.replaceChildren();
+      for (const doctor of doctors) {
+        const row = document.createElement('tr');
+        for (const value of [doctor.doctorName, doctor.clinicName, doctor.email, doctor.totalAppointments, doctor.upcomingAppointments, doctor.isActive ? 'Active' : 'Inactive']) {
+          const cell = document.createElement('td');
+          cell.textContent = String(value);
+          row.append(cell);
+        }
+        const actionCell = document.createElement('td');
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = doctor.isActive ? 'btn btn-outline-danger btn-sm' : 'btn btn-outline-success btn-sm';
+        toggle.textContent = doctor.isActive ? 'Deactivate' : 'Activate';
+        toggle.addEventListener('click', async () => {
+          try {
+            const update = await fetch(`/api/admin/doctors/${encodeURIComponent(doctor.doctorId)}/active`, {
+              method: 'PATCH',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ isActive: !doctor.isActive })
+            });
+            if (!update.ok) throw new Error('Could not update doctor access.');
+            await loadDoctors();
+          } catch (error) {
+            showError(error.message);
+          }
+        });
+        actionCell.append(toggle);
+        row.append(actionCell);
+        doctorRows.append(row);
+      }
+    }
+
+    document.querySelector('#login-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      notice.hidden = true;
+      try {
+        const response = await fetch('/api/dashboard/login', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: document.querySelector('#email').value,
+            password: document.querySelector('#password').value
+          })
+        });
+        if (!response.ok) throw new Error(response.status === 503 ? 'Dashboard login is not configured.' : 'Email or password is incorrect.');
+        const sessionResponse = await fetch('/api/dashboard/session', { credentials: 'same-origin' });
+        if (!sessionResponse.ok) throw new Error('Could not load dashboard session.');
+        showDashboard(await sessionResponse.json());
+      } catch (error) {
+        showError(error.message);
+      }
+    });
+
+    document.querySelector('#date-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      loadAppointments().catch((error) => showError(error.message));
+    });
+    document.querySelector('#doctor-settings-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const payload = {
+        doctorName: document.querySelector('#profile-doctor-name').value,
+        clinicName: document.querySelector('#profile-clinic-name').value,
+        facilitiesList: document.querySelector('#profile-facilities').value.split('\n').map((item) => item.trim()).filter(Boolean),
+        welcomeMessage: document.querySelector('#profile-welcome').value
+      };
+      try {
+        const response = await fetch('/api/dashboard/settings', {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error('Could not save bot settings.');
+        await loadDoctorSettings();
+      } catch (error) {
+        showError(error.message);
+      }
+    });
+    document.querySelector('#refresh').addEventListener('click', () => {
+      loadAppointments().catch((error) => showError(error.message));
+    });
+    document.querySelector('#admin-refresh').addEventListener('click', () => {
+      loadDoctors().catch((error) => showError(error.message));
+    });
+    document.querySelector('#create-doctor-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+      payload.facilitiesList = payload.facilitiesList.split('\n').map((item) => item.trim()).filter(Boolean);
+      try {
+        const response = await fetch('/api/admin/doctors', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+          const result = await response.json();
+          throw new Error(result.error || 'Could not create doctor account.');
+        }
+        event.currentTarget.reset();
+        await loadDoctors();
+      } catch (error) {
+        showError(error.message);
+      }
+    });
+    logoutButton.addEventListener('click', async () => {
+      await fetch('/api/dashboard/logout', { method: 'POST', credentials: 'same-origin' });
+      dashboardSection.hidden = true;
+      adminSection.hidden = true;
+      logoutButton.hidden = true;
+      loginSection.hidden = false;
+    });
+
+    fetch('/api/dashboard/session', { credentials: 'same-origin' })
+      .then(async (response) => {
+        if (!response.ok) return;
+        showDashboard(await response.json());
+      })
+      .catch(() => showError('Dashboard connection is unavailable.'));
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/dashboard-sw.js').catch(() => {});
+    }
+  </script>
+</body>
+</html>
