@@ -120,12 +120,19 @@ const religiousHolidayEventSchema = new Schema({
   religion: { type: String, enum: ['Christian', 'Muslim', 'Hindu', 'Other'], required: true }
 }, { _id: false });
 
+const facilityPricingSchema = new Schema({
+  name: { type: String, required: true, trim: true, maxlength: 100 },
+  price: { type: Number, required: true, min: 0, max: 10_000_000 }
+}, { _id: false });
+
 const doctorSchema = new Schema({
   doctorId: { type: String, required: true, unique: true },
   doctorName: { type: String, required: true, maxlength: 120, default: 'Doctor' },
   clinicName: { type: String, required: true, maxlength: 160, default: 'Clinic' },
   email: { type: String, required: true, lowercase: true, unique: true },
   facilitiesList: { type: [String], default: [] },
+  basicCheckupFee: { type: Number, min: 0, max: 10_000_000, default: null },
+  facilityPricing: { type: [facilityPricingSchema], default: [] },
   servicesList: { type: [String], default: [] },
   consultationDetails: { type: String, maxlength: 2000, default: '' },
   workingDays: { type: [Number], enum: [0, 1, 2, 3, 4, 5, 6], default: [1, 2, 3, 4, 5] },

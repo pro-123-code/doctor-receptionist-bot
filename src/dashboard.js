@@ -6,6 +6,7 @@ const { DashboardUser, Doctor, consumeDashboardLoginAttempt } = require('./model
 const { hashPassword, verifyPassword } = require('./passwords');
 const { encryptJson, hasValidEncryptionKey } = require('./secretBox');
 const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
+const { isValidRupeeAmount, normalizeFacilityPricing } = require('./facilityPricing');
 
 const cookieName = 'doctorbot_dashboard';
 const sessionDurationSeconds = 8 * 60 * 60;
@@ -376,6 +377,8 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       clinicName: doctor.clinicName,
       email: doctor.email,
       facilitiesList: doctor.facilitiesList,
+      basicCheckupFee: doctor.basicCheckupFee ?? null,
+      facilityPricing: doctor.facilityPricing || [],
       servicesList: doctor.servicesList || [],
       consultationDetails: doctor.consultationDetails || '',
       workingDays: doctor.workingDays || [1, 2, 3, 4, 5],
@@ -426,19 +429,24 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     if (!doctor) return response.status(403).json({ error: 'Doctor access required' });
     const {
       doctorName, clinicName, facilitiesList, servicesList, consultationDetails,
-      workingDays, offDays, religion, welcomeMessage
+      workingDays, offDays, religion, basicCheckupFee, facilityPricing, welcomeMessage
     } = request.body || {};
     const normalizedFacilities = normalizeFacilitiesList(facilitiesList);
     const normalizedServices = normalizeFacilitiesList(servicesList);
     const normalizedWorkingDays = normalizeWorkingDays(workingDays);
     const normalizedOffDays = normalizeOffDays(offDays);
+    const normalizedPricing = normalizeFacilityPricing(facilityPricing);
+    const listedItems = [...(normalizedFacilities || []), ...(normalizedServices || [])];
+    const pricedNames = new Set((normalizedPricing || []).map(({ name }) => name.toLocaleLowerCase('en')));
     if (typeof doctorName !== 'string' || !doctorName.trim() || doctorName.length > 120 ||
       typeof clinicName !== 'string' || !clinicName.trim() || clinicName.length > 160 ||
       !normalizedFacilities || !normalizedServices || !normalizedWorkingDays || !normalizedOffDays ||
+      !isValidRupeeAmount(basicCheckupFee) ||
+      !normalizedPricing || listedItems.some((name) => !pricedNames.has(name.toLocaleLowerCase('en'))) ||
       typeof consultationDetails !== 'string' || !consultationDetails.trim() || consultationDetails.length > 2000 ||
       !['Christian', 'Muslim', 'Hindu', 'Other'].includes(religion) ||
       typeof welcomeMessage !== 'string' || welcomeMessage.length > 1000) {
-      return response.status(400).json({ error: 'Provide doctor and clinic names, facilities, services, consultation details, working days, valid off-days, and a welcome message under 1000 characters.' });
+      return response.status(400).json({ error: 'Provide valid doctor and clinic details, working days, off-days, a basic checkup fee, and a price for every facility and service.' });
     }
 
     try {
@@ -448,6 +456,8 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
           doctorName: doctorName.trim(),
           clinicName: clinicName.trim(),
           facilitiesList: normalizedFacilities,
+          basicCheckupFee,
+          facilityPricing: normalizedPricing,
           servicesList: normalizedServices,
           consultationDetails: consultationDetails.trim(),
           workingDays: normalizedWorkingDays,
@@ -472,6 +482,8 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         doctorName: updatedDoctor.doctorName,
         clinicName: updatedDoctor.clinicName,
         facilitiesList: updatedDoctor.facilitiesList,
+        basicCheckupFee: updatedDoctor.basicCheckupFee,
+        facilityPricing: updatedDoctor.facilityPricing,
         servicesList: updatedDoctor.servicesList,
         consultationDetails: updatedDoctor.consultationDetails,
         workingDays: updatedDoctor.workingDays,

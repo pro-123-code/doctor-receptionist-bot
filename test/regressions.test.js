@@ -14,6 +14,7 @@ const { createGoogleOAuthState, createSessionToken, mountDashboard, verifyGoogle
 const { generateAppointmentsWorkbook } = require('../src/excelGenerator');
 const { getCalendarErrorDetails } = require('../src/calendarErrors');
 const { getWelcomeMessage } = require('../src/greetings');
+const { formatRupees, getFacilityPrice, normalizeFacilityPricing } = require('../src/facilityPricing');
 const { hashPassword, verifyPassword } = require('../src/passwords');
 const { decryptJson, encryptJson, hasValidEncryptionKey } = require('../src/secretBox');
 const { buildSystemInstruction } = require('../src/gemini');
@@ -46,6 +47,8 @@ test('doctor profile defaults satisfy required name fields', async () => {
   assert.deepEqual(doctor.workingDays, [1, 2, 3, 4, 5]);
   assert.deepEqual(doctor.offDays, []);
   assert.equal(doctor.setupComplete, false);
+  assert.equal(doctor.basicCheckupFee, null);
+  assert.deepEqual(doctor.facilityPricing, []);
 });
 
 test('natural dates use the clinic-local calendar date', () => {
@@ -745,6 +748,12 @@ test('clinic setup saves tenant schedule and gates WhatsApp pairing', async () =
         clinicName: 'Tenant Clinic',
         facilitiesList: ['OPD', 'Imaging'],
         servicesList: ['Vaccination'],
+        basicCheckupFee: 800,
+        facilityPricing: [
+          { name: 'OPD', price: 800 },
+          { name: 'Imaging', price: 1500 },
+          { name: 'Vaccination', price: 500 }
+        ],
         consultationDetails: 'Appointments required.',
         workingDays: [6, 1, 6],
         offDays: ['2026-12-25'],
@@ -776,12 +785,28 @@ test('clinic setup saves tenant schedule and gates WhatsApp pairing', async () =
     assert.deepEqual(savedUpdate.$set.offDays, ['2026-12-25']);
     assert.deepEqual(savedUpdate.$set.servicesList, ['Vaccination']);
     assert.equal(savedUpdate.$set.religion, 'Muslim');
+    assert.equal(savedUpdate.$set.basicCheckupFee, 800);
+    assert.deepEqual(savedUpdate.$set.facilityPricing, [
+      { name: 'OPD', price: 800 },
+      { name: 'Imaging', price: 1500 },
+      { name: 'Vaccination', price: 500 }
+    ]);
 
     response = makeResponse();
     await connectAuth(request, response, () => {});
     await connectHandler(request, response);
     assert.equal(response.statusCode, 202);
     assert.equal(pairingStarted, true);
+
+    request.body.basicCheckupFee = 950;
+    request.body.facilityPricing[1].price = 1900;
+    response = makeResponse();
+    await settingsAuth(request, response, () => {});
+    await settingsHandler(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(savedFilter.doctorId, user.doctorId);
+    assert.equal(response.body.basicCheckupFee, 950);
+    assert.equal(response.body.facilityPricing[1].price, 1900);
   } finally {
     DashboardUser.findById = originalMethods.dashboardFindById;
     Doctor.findOne = originalMethods.doctorFindOne;
@@ -820,7 +845,13 @@ test('first-message greetings are deterministic and include ordered facilities',
     welcomeMessage: 'Welcome to Example Clinic',
     facilitiesList: ['Outpatient', 'Imaging'],
     servicesList: ['Vaccination'],
-    consultationDetails: 'By appointment only.'
+    consultationDetails: 'By appointment only.',
+    basicCheckupFee: 800,
+    facilityPricing: [
+      { name: 'Outpatient', price: 500 },
+      { name: 'Imaging', price: 1500 },
+      { name: 'Vaccination', price: 650 }
+    ]
   };
   assert.match(getWelcomeMessage('Hi', doctor), /^Hello!/);
   assert.match(getWelcomeMessage('Salam', doctor), /^Walaikum Assalam!/);
@@ -828,6 +859,11 @@ test('first-message greetings are deterministic and include ordered facilities',
   assert.match(getWelcomeMessage('Hi', doctor), /1\. Outpatient[\s\S]*2\. Imaging/);
   assert.match(getWelcomeMessage('Hi', doctor), /Vaccination/);
   assert.match(getWelcomeMessage('Hi', doctor), /By appointment only/);
+  assert.match(getWelcomeMessage('Hi', doctor), /Dr\. Example ke Example Clinic/);
+  assert.match(getWelcomeMessage('Hi', doctor), /Basic checkup fee: Rs\. 800/);
+  assert.match(getWelcomeMessage('Hi', doctor), /Outpatient: Rs\. 500/);
+  assert.match(getWelcomeMessage('Hi', doctor), /Imaging: Rs\. 1,500/);
+  assert.match(getWelcomeMessage('Hi', doctor), /Vaccination: Rs\. 650/);
   assert.doesNotMatch(getWelcomeMessage('Hi', doctor), /Dr\. Ahmad|City Care Clinic|General OPD/);
 });
 
@@ -1018,4 +1054,23 @@ test('Google Calendar OAuth uses shared config and stores the encrypted token pe
       else process.env[name] = previousEnvironment[name];
     }
   }
+});
+
+test('facility pricing validates unique rate rows and formats Pakistani rupees', () => {
+  const rates = normalizeFacilityPricing([
+    { name: 'Blood Test', price: 500 },
+    { name: 'Ultrasound', price: 1500.5 },
+    { name: 'Injection', price: 0.29 }
+  ]);
+  assert.deepEqual(rates, [
+    { name: 'Blood Test', price: 500 },
+    { name: 'Ultrasound', price: 1500.5 },
+    { name: 'Injection', price: 0.29 }
+  ]);
+  assert.equal(getFacilityPrice({ facilityPricing: rates }, 'blood test'), 'Rs. 500');
+  assert.equal(formatRupees(1500.5), 'Rs. 1,500.5');
+  assert.equal(formatRupees(null), null);
+  assert.equal(normalizeFacilityPricing([{ name: 'Scan', price: -1 }]), null);
+  assert.equal(normalizeFacilityPricing([{ name: 'Lab', price: 100 }, { name: ' lab ', price: 200 }]), null);
+  assert.equal(normalizeFacilityPricing([{ name: 'Lab', price: null }]), null);
 });

@@ -60,6 +60,12 @@
           <div class="col-sm-6"><label class="form-label" for="profile-religion">Religion</label><select id="profile-religion" class="form-select" required><option value="Christian">Christian</option><option value="Muslim">Muslim</option><option value="Hindu">Hindu</option><option value="Other">Other</option></select></div>
           <div class="col-md-6"><label class="form-label" for="profile-facilities">Facilities (one per line)</label><textarea id="profile-facilities" class="form-control" rows="4" required></textarea></div>
           <div class="col-md-6"><label class="form-label" for="profile-services">Treatments and services (one per line)</label><textarea id="profile-services" class="form-control" rows="4" required></textarea></div>
+          <div class="col-md-6"><label class="form-label" for="basic-checkup-fee">Basic checkup fee (Rs.)</label><input id="basic-checkup-fee" class="form-control" type="number" min="0" max="10000000" step="0.01" required></div>
+          <div class="col-12">
+            <label class="form-label" for="facility-pricing-list">Facility and treatment prices (Rs.)</label>
+            <div id="facility-pricing-list" class="vstack gap-2"></div>
+            <button id="add-facility-pricing" class="btn btn-outline-secondary btn-sm mt-2" type="button">Add priced item</button>
+          </div>
           <div class="col-12"><label class="form-label" for="profile-consultation-details">Consultation details</label><textarea id="profile-consultation-details" class="form-control" rows="3" maxlength="2000" required></textarea></div>
           <fieldset class="col-12">
             <legend class="form-label">Working days</legend>
@@ -184,6 +190,7 @@
     const editClinicSetupButton = document.querySelector('#edit-clinic-setup');
     const cancelClinicSetupButton = document.querySelector('#cancel-clinic-setup');
     const offDayList = document.querySelector('#off-day-list');
+    const facilityPricingList = document.querySelector('#facility-pricing-list');
     const whatsappStatus = document.querySelector('#whatsapp-connection-status');
     const whatsappButton = document.querySelector('#connect-whatsapp');
     const whatsappQrPanel = document.querySelector('#whatsapp-qr-panel');
@@ -275,7 +282,16 @@
       document.querySelector('#profile-religion').value = settings.religion || 'Other';
       document.querySelector('#profile-facilities').value = settings.facilitiesList.join('\n');
       document.querySelector('#profile-services').value = (settings.servicesList || []).join('\n');
+      document.querySelector('#basic-checkup-fee').value = settings.basicCheckupFee ?? '';
       document.querySelector('#profile-consultation-details').value = settings.consultationDetails || '';
+      const listedItems = [...settings.facilitiesList, ...(settings.servicesList || [])];
+      const pricingRows = settings.facilityPricing?.length
+        ? settings.facilityPricing
+        : listedItems.map((name) => ({ name, price: '' }));
+      facilityPricingList.replaceChildren();
+      for (const pricing of pricingRows.length ? pricingRows : [{ name: '', price: '' }]) {
+        appendFacilityPricingRow(pricing);
+      }
       document.querySelector('#profile-welcome').value = settings.welcomeMessage || '';
       const workingDays = new Set(settings.workingDays || []);
       document.querySelectorAll('.working-day').forEach((checkbox) => {
@@ -317,6 +333,50 @@
         item.append(removeButton, document.createTextNode(offDay));
         offDayList.append(item);
       }
+    }
+
+    function appendFacilityPricingRow(pricing = { name: '', price: '' }) {
+      const row = document.createElement('div');
+      row.className = 'row g-2 align-items-center pricing-row';
+      const nameColumn = document.createElement('div');
+      nameColumn.className = 'col-md-6';
+      const nameInput = document.createElement('input');
+      nameInput.className = 'form-control';
+      nameInput.type = 'text';
+      nameInput.maxLength = 100;
+      nameInput.required = true;
+      nameInput.placeholder = 'Blood Test';
+      nameInput.setAttribute('aria-label', 'Facility or treatment name');
+      nameInput.dataset.pricingName = '';
+      nameInput.value = pricing.name || '';
+      nameColumn.append(nameInput);
+
+      const priceColumn = document.createElement('div');
+      priceColumn.className = 'col-md-4';
+      const priceInput = document.createElement('input');
+      priceInput.className = 'form-control';
+      priceInput.type = 'number';
+      priceInput.min = '0';
+      priceInput.max = '10000000';
+      priceInput.step = '0.01';
+      priceInput.required = true;
+      priceInput.placeholder = '500';
+      priceInput.setAttribute('aria-label', 'Price in rupees');
+      priceInput.dataset.pricingPrice = '';
+      priceInput.value = pricing.price ?? '';
+      priceColumn.append(priceInput);
+
+      const removeColumn = document.createElement('div');
+      removeColumn.className = 'col-md-2';
+      const removeButton = document.createElement('button');
+      removeButton.className = 'btn btn-outline-danger';
+      removeButton.type = 'button';
+      removeButton.textContent = 'Remove';
+      removeButton.setAttribute('aria-label', 'Remove priced item');
+      removeButton.addEventListener('click', () => row.remove());
+      removeColumn.append(removeButton);
+      row.append(nameColumn, priceColumn, removeColumn);
+      facilityPricingList.append(row);
     }
 
     async function loadWhatsAppStatus() {
@@ -423,12 +483,20 @@
         religion: document.querySelector('#profile-religion').value,
         facilitiesList: document.querySelector('#profile-facilities').value.split('\n').map((item) => item.trim()).filter(Boolean),
         servicesList: document.querySelector('#profile-services').value.split('\n').map((item) => item.trim()).filter(Boolean),
+        basicCheckupFee: Number(document.querySelector('#basic-checkup-fee').value),
+        facilityPricing: [...facilityPricingList.querySelectorAll('.pricing-row')].map((row) => ({
+          name: row.querySelector('[data-pricing-name]').value,
+          price: row.querySelector('[data-pricing-price]').value === ''
+            ? null
+            : Number(row.querySelector('[data-pricing-price]').value)
+        })),
         consultationDetails: document.querySelector('#profile-consultation-details').value,
         workingDays,
         offDays: configuredOffDays,
         welcomeMessage: document.querySelector('#profile-welcome').value
       };
       try {
+        const setupWasComplete = clinicSetupComplete;
         const response = await fetch('/api/dashboard/settings', {
           method: 'PUT',
           credentials: 'same-origin',
@@ -444,7 +512,7 @@
         const settings = await loadDoctorSettings();
         if (settings.setupComplete) {
           await loadAppointments();
-          await startWhatsAppPairing();
+          if (!setupWasComplete) await startWhatsAppPairing();
         }
       } catch (error) {
         showError(error.message);
@@ -457,6 +525,7 @@
       document.querySelector('#off-day-date').value = '';
       renderOffDays();
     });
+    document.querySelector('#add-facility-pricing').addEventListener('click', () => appendFacilityPricingRow());
     editClinicSetupButton.addEventListener('click', () => {
       editingClinicSetup = true;
       setupPanel.hidden = false;

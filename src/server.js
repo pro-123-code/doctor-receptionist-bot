@@ -16,6 +16,7 @@ const { mountDashboard } = require('./dashboard');
 const { startDailyReport } = require('./cronJobs');
 const { getCalendarErrorDetails } = require('./calendarErrors');
 const { getWelcomeMessage } = require('./greetings');
+const { formatFacilityRate, formatRupees } = require('./facilityPricing');
 const { decryptJson } = require('./secretBox');
 const { getReligiousHoliday, getReligiousHolidays, isClinicOpenOnDate } = require('./clinicSchedule');
 const { drainInboundQueue, enqueueInboundMessage, getMessageId, getReceivedAt } = require('./messageQueue');
@@ -203,7 +204,7 @@ function isGreeting(message) {
 }
 
 function isFacilityQuestion(message) {
-  return /\b(facilit(?:y|ies)|services?|treatments?|consultations?|what tests|which tests|do you (?:have|offer)|available at (?:the )?clinic)\b/i.test(message);
+  return /\b(facilit(?:y|ies)|services?|treatments?|consultations?|prices?|rates?|costs?|fees?|charges?|what tests|which tests|do you (?:have|offer)|available at (?:the )?clinic)\b/i.test(message);
 }
 
 function getZonedParts(date) {
@@ -604,14 +605,16 @@ async function handleConversationMessage(sender, message, doctorProfile) {
 
   if (isGreeting(normalizedMessage)) return welcomeMessage();
   if (isFacilityQuestion(normalizedMessage)) {
-    const facilities = doctorProfile.facilitiesList.join(', ');
+    const facilities = doctorProfile.facilitiesList
+      .map((facility) => formatFacilityRate(doctorProfile, facility)).join(', ');
     const services = doctorProfile.servicesList?.length
-      ? ` Hamari services aur treatments: ${doctorProfile.servicesList.join(', ')}.`
+      ? ` Hamari services aur treatments: ${doctorProfile.servicesList.map((service) => formatFacilityRate(doctorProfile, service)).join(', ')}.`
       : '';
     const consultation = doctorProfile.consultationDetails?.trim()
       ? ` ${doctorProfile.consultationDetails.trim()}`
       : '';
-    return `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein ${facilities} ki sahuliyaat mojood hain.${services}${consultation}`;
+    const checkupFee = formatRupees(doctorProfile.basicCheckupFee) || 'price ke liye rabta karein';
+    return `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein yeh sahuliyaat mojood hain: ${facilities}. Basic checkup fee ${checkupFee}.${services}${consultation}`;
   }
 
   if (conversation.step === 'calendarSelection') {
