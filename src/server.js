@@ -66,12 +66,7 @@ if (
   throw new Error('Invalid appointment or office-hours configuration');
 }
 
-app.use((request, response, next) => {
-  if (process.env.NODE_ENV === 'production' && !request.secure) {
-    return response.status(400).json({ error: 'HTTPS required' });
-  }
-  next();
-});
+
 
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
