@@ -96,6 +96,15 @@
           <div class="col-sm-6"><label class="form-label" for="profile-welcome">Welcome message</label><textarea id="profile-welcome" class="form-control" rows="4" maxlength="1000"></textarea></div>
           <div class="col-12"><button class="btn btn-primary" type="submit">Save bot settings</button></div>
         </form>
+        <div class="border-top pt-3" aria-labelledby="whatsapp-title">
+          <h3 id="whatsapp-title" class="h4">WhatsApp connection</h3>
+          <p id="whatsapp-connection-status" class="text-secondary" aria-live="polite">Not connected</p>
+          <button id="connect-whatsapp" class="btn btn-success" type="button">Connect WhatsApp</button>
+          <div id="whatsapp-qr-panel" class="mt-3" hidden>
+            <img id="whatsapp-qr" width="320" height="320" alt="WhatsApp device-linking QR code">
+            <p class="text-secondary mt-2">On your phone, open WhatsApp, choose Linked devices, then scan this code.</p>
+          </div>
+        </div>
       </section>
     </section>
 
@@ -143,6 +152,11 @@
     const emptyState = document.querySelector('#empty-state');
     const logoutButton = document.querySelector('#logout');
     const doctorRows = document.querySelector('#doctor-accounts');
+    const whatsappStatus = document.querySelector('#whatsapp-connection-status');
+    const whatsappButton = document.querySelector('#connect-whatsapp');
+    const whatsappQrPanel = document.querySelector('#whatsapp-qr-panel');
+    const whatsappQr = document.querySelector('#whatsapp-qr');
+    let whatsappPollTimer;
 
     function showError(message) {
       notice.textContent = message;
@@ -163,6 +177,7 @@
       if (session.role === 'DOCTOR') {
         loadAppointments().catch((error) => showError(error.message));
         loadDoctorSettings().catch((error) => showError(error.message));
+        loadWhatsAppStatus().catch((error) => showError(error.message));
       } else if (session.role === 'SUPERADMIN') {
         loadDoctors().catch((error) => showError(error.message));
       }
@@ -231,6 +246,33 @@
       const oauthSetup = document.querySelector('#calendar-oauth-setup');
       connectCalendar.hidden = !settings.calendarOAuthAvailable;
       oauthSetup.hidden = settings.calendarOAuthAvailable;
+    }
+
+    async function loadWhatsAppStatus() {
+      clearTimeout(whatsappPollTimer);
+      const response = await fetch('/api/dashboard/whatsapp/status', { credentials: 'same-origin' });
+      if (!response.ok) throw new Error('Could not load WhatsApp connection status.');
+      const state = await response.json();
+      const labels = {
+        disconnected: 'Not connected',
+        starting: 'Starting secure connection…',
+        qr: state.qrDataUrl ? 'Scan this QR code with WhatsApp.' : 'Preparing QR code…',
+        connected: 'WhatsApp is connected.',
+        reconnecting: 'Connection interrupted. Reconnecting…',
+        loggedOut: 'WhatsApp was logged out. Connect again to relink this device.',
+        error: 'Could not start WhatsApp. Try again.'
+      };
+      whatsappStatus.textContent = labels[state.status] || 'Not connected';
+      whatsappQrPanel.hidden = !state.qrDataUrl;
+      if (state.qrDataUrl) whatsappQr.src = state.qrDataUrl;
+      whatsappButton.disabled = ['starting', 'qr', 'connected', 'reconnecting'].includes(state.status);
+      whatsappButton.textContent = state.status === 'connected' ? 'WhatsApp connected' :
+        state.status === 'starting' || state.status === 'qr' || state.status === 'reconnecting'
+          ? 'Connecting…'
+          : 'Connect WhatsApp';
+      if (['starting', 'qr', 'reconnecting'].includes(state.status)) {
+        whatsappPollTimer = setTimeout(() => loadWhatsAppStatus().catch((error) => showError(error.message)), 1500);
+      }
     }
 
     async function loadDoctors() {
@@ -314,6 +356,22 @@
         if (!response.ok) throw new Error('Could not save bot settings.');
         await loadDoctorSettings();
       } catch (error) {
+        showError(error.message);
+      }
+    });
+    whatsappButton.addEventListener('click', async () => {
+      whatsappButton.disabled = true;
+      whatsappStatus.textContent = 'Starting secure connection…';
+      whatsappQrPanel.hidden = true;
+      try {
+        const response = await fetch('/api/dashboard/whatsapp/connect', {
+          method: 'POST',
+          credentials: 'same-origin'
+        });
+        if (!response.ok) throw new Error('Could not start WhatsApp connection. Please try again.');
+        await loadWhatsAppStatus();
+      } catch (error) {
+        whatsappButton.disabled = false;
         showError(error.message);
       }
     });

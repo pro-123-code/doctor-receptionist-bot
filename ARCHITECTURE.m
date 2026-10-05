@@ -13,11 +13,11 @@ An automated WhatsApp receptionist for Dr. Ahmad's clinic. The service collects 
 - **Dashboard:** Tabler UI served by Express; authenticated read-only appointment API
 
 ## 3. Core Modules & Data Flow
-1. **WhatsApp Gateway:** The worker manager loads one Baileys auth directory per active doctor and prints each new doctor's QR code.
+1. **WhatsApp Gateway:** Each doctor can initiate Baileys pairing from the dashboard. The one-time QR image is delivered only to that authenticated doctor; session files live in a private OS-local `DoctorBot/sessions/doctor_<doctorId>` directory (or the configured `BAILEYS_AUTH_DIR`) and saved sessions reconnect after restart. Existing `auth_info_baileys/<doctorId>` sessions remain readable for migration compatibility.
 2. **Conversation Manager:** Loads `doctorName`, `clinicName`, `facilitiesList`, and `welcomeMessage` from the active Doctor profile. First-message prefixes are deterministic, and Gemini receives that same profile for schema-constrained extraction. The flow collects name, contact number, symptoms, and requested date in that order.
 3. **Calendar Integration:** Doctors connect through `/api/auth/google` and `/api/auth/google/callback`; OAuth state is signed, short-lived, and one-time. Refresh tokens are encrypted in that doctor's profile. Date parsing and booking resolve only that clinic-local day and reserve the slot before creating a Calendar event.
 4. **Reminder Queue:** Restores future appointment reminders from MongoDB after WhatsApp reconnects.
-5. **Daily Report:** At `DAILY_REPORT_CRON` (default `23:59`), queries appointments booked that clinic-local day, creates an `.xlsx` attachment, and emails it to `DOCTOR_EMAIL`.
+5. **Daily Report:** At 00:00 Asia/Karachi, queries each active doctor's booked appointments in the next 24 hours, creates an `.xlsx` attachment with patient details and status, and emails it to that doctor's registered address.
 6. **Dashboard:** The PWA at `/dashboard` authenticates database-backed `SUPERADMIN` and `DOCTOR` users with scrypt password hashes and HttpOnly signed sessions. Doctor APIs scope records by `doctorId`; superadmins can create doctors, view aggregate usage, and suspend accounts.
 
 ## 4. Deployment Boundary

@@ -7,13 +7,14 @@ async function generateAppointmentsWorkbook(appointments, timeZone, clinicName =
 
   const worksheet = workbook.addWorksheet('Appointments', {
     views: [{ state: 'frozen', ySplit: 1 }],
-    autoFilter: 'A1:D1'
+    autoFilter: 'A1:E1'
   });
   worksheet.columns = [
     { header: 'Patient Name', key: 'patientName', width: 28 },
     { header: 'WhatsApp Number', key: 'whatsAppNumber', width: 24 },
     { header: 'Symptoms', key: 'symptoms', width: 48 },
-    { header: 'Appointment Slot', key: 'appointmentSlot', width: 36 }
+    { header: 'Appointment Slot', key: 'appointmentSlot', width: 36 },
+    { header: 'Status', key: 'status', width: 16 }
   ];
   worksheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
   worksheet.getRow(1).fill = {
@@ -34,7 +35,8 @@ async function generateAppointmentsWorkbook(appointments, timeZone, clinicName =
       }).format(appointment.slotStart)} - ${new Intl.DateTimeFormat('en', {
         timeStyle: 'short',
         timeZone
-      }).format(appointment.slotEnd)}`
+      }).format(appointment.slotEnd)}`,
+      status: appointment.status
     });
   }
 

@@ -3,7 +3,7 @@ const cron = require('node-cron');
 const nodemailer = require('nodemailer');
 const { Appointment, claimDailyReportRun, completeDailyReportRun, Doctor, recordServiceLog } = require('./models');
 const { generateAppointmentsWorkbook } = require('./excelGenerator');
-const { getLocalDateParts, getLocalDayBounds } = require('./dateParser');
+const { getLocalDateParts } = require('./dateParser');
 
 function reportError(error, doctorId, reason) {
   const code = /^[A-Za-z0-9_-]{1,64}$/.test(String(error?.code || ''))
@@ -22,7 +22,7 @@ function startDailyReport(doctorProfile) {
     return null;
   }
 
-  const schedule = process.env.DAILY_REPORT_CRON || '59 23 * * *';
+  const schedule = '0 0 * * *';
   const timeZone = 'Asia/Karachi';
   if (process.env.GOOGLE_TIME_ZONE && process.env.GOOGLE_TIME_ZONE !== timeZone) {
     throw new Error('GOOGLE_TIME_ZONE must be Asia/Karachi');
@@ -30,7 +30,6 @@ function startDailyReport(doctorProfile) {
   if (process.env.DAILY_REPORT_TIME_ZONE && process.env.DAILY_REPORT_TIME_ZONE !== timeZone) {
     throw new Error('DAILY_REPORT_TIME_ZONE must be Asia/Karachi');
   }
-  if (!cron.validate(schedule)) throw new Error('DAILY_REPORT_CRON is invalid');
   new Intl.DateTimeFormat('en', { timeZone });
 
   let dispatchUnavailableReason = missingSettings.length
@@ -66,8 +65,9 @@ function startDailyReport(doctorProfile) {
     try {
       const currentDoctor = await Doctor.findOne({ doctorId: reportDoctorId, isActive: true }).lean();
       if (!currentDoctor) return;
-      const reportDate = getLocalDateParts(new Date(), timeZone);
-      const { start, end } = getLocalDayBounds(reportDate, timeZone);
+      const start = new Date();
+      const reportDate = getLocalDateParts(start, timeZone);
+      const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
       reportDateKey = `${reportDate.year}-${String(reportDate.month).padStart(2, '0')}-${String(reportDate.day).padStart(2, '0')}`;
       lockToken = crypto.randomUUID();
       claimed = await claimDailyReportRun(reportDoctorId, reportDateKey, lockToken, reportDoctorId);
@@ -79,7 +79,7 @@ function startDailyReport(doctorProfile) {
       const appointments = await Appointment.find({
         doctorId: reportDoctorId,
         status: 'booked',
-        bookedAt: { $gte: start, $lt: end }
+        slotStart: { $gte: start, $lt: end }
       }).sort({ slotStart: 1 }).lean();
       if (!currentDoctor.email) {
         reportError(new Error('Daily report recipient is not configured'), reportDoctorId,

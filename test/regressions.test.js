@@ -4,6 +4,7 @@ const ExcelJS = require('exceljs');
 const mongoose = require('mongoose');
 const { google } = require('googleapis');
 const cron = require('node-cron');
+const nodemailer = require('nodemailer');
 const { getLocalDayBounds, parseRequestedDate } = require('../src/dateParser');
 const { createGoogleOAuthState, createSessionToken, mountDashboard, verifyGoogleOAuthState, verifySessionToken } = require('../src/dashboard');
 const { generateAppointmentsWorkbook } = require('../src/excelGenerator');
@@ -202,7 +203,7 @@ test('Google Calendar OAuth requires a valid credential encryption key', () => {
 });
 
 test('daily report cron remains scheduled when SMTP is not configured', () => {
-  const settingNames = ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM'];
+  const settingNames = ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM', 'DAILY_REPORT_CRON'];
   const previousSettings = Object.fromEntries(settingNames.map((name) => [name, process.env[name]]));
   const originalSchedule = cron.schedule;
   let scheduledJob;
@@ -216,6 +217,7 @@ test('daily report cron remains scheduled when SMTP is not configured', () => {
     const task = startDailyReport({ doctorId: 'report-test-clinic', email: 'doctor@example.test' });
     assert.ok(task);
     assert.ok(scheduledJob);
+    assert.equal(scheduledJob.expression, '0 0 * * *');
     assert.equal(scheduledJob.options.timezone, 'Asia/Karachi');
     assert.equal(scheduledJob.options.noOverlap, true);
   } finally {
@@ -227,6 +229,222 @@ test('daily report cron remains scheduled when SMTP is not configured', () => {
   }
 });
 
+test('midnight report filters booked appointments in the next 24 hours per doctor', async () => {
+  const settingNames = ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM', 'DAILY_REPORT_CRON'];
+  const previousSettings = Object.fromEntries(settingNames.map((name) => [name, process.env[name]]));
+  const Doctor = mongoose.models.Doctor;
+  const Appointment = mongoose.models.Appointment;
+  const DailyReportRun = mongoose.models.DailyReportRun;
+  const ServiceLog = mongoose.models.ServiceLog;
+  const originalMethods = {
+    doctorFindOne: Doctor.findOne,
+    doctorExists: Doctor.exists,
+    appointmentFind: Appointment.find,
+    reportFindOneAndUpdate: DailyReportRun.findOneAndUpdate,
+    reportCreate: DailyReportRun.create,
+    reportUpdateOne: DailyReportRun.updateOne,
+    serviceLogCreate: ServiceLog.create,
+    schedule: cron.schedule
+  };
+  let scheduledJob;
+  let appointmentFilter;
+  let completion;
+  for (const name of settingNames) process.env[name] = '';
+  process.env.DAILY_REPORT_CRON = '17 23 * * *';
+  cron.schedule = (expression, callback, options) => {
+    scheduledJob = { expression, callback, options };
+    return { stop() {} };
+  };
+  Doctor.findOne = () => ({ lean: async () => ({
+    doctorId: 'report-tenant', clinicName: 'Tenant Clinic', email: 'tenant@example.test', isActive: true
+  }) });
+  Doctor.exists = async () => true;
+  Appointment.find = (filter) => {
+    appointmentFilter = filter;
+    return { sort() { return this; }, lean: async () => [] };
+  };
+  DailyReportRun.findOneAndUpdate = async () => null;
+  DailyReportRun.create = async () => ({});
+  DailyReportRun.updateOne = async (filter, update) => {
+    completion = { filter, update };
+    return { modifiedCount: 1 };
+  };
+  ServiceLog.create = async () => ({});
+
+  try {
+    startDailyReport({ doctorId: 'report-tenant' });
+    assert.equal(scheduledJob.expression, '0 0 * * *');
+    await scheduledJob.callback();
+    assert.equal(appointmentFilter.doctorId, 'report-tenant');
+    assert.equal(appointmentFilter.status, 'booked');
+    assert.equal(appointmentFilter.slotStart.$lt - appointmentFilter.slotStart.$gte, 24 * 60 * 60 * 1000);
+    assert.ok(completion);
+    assert.equal(completion.filter.doctorId, 'report-tenant');
+    assert.equal(completion.update.$set.status, 'failed');
+  } finally {
+    Doctor.findOne = originalMethods.doctorFindOne;
+    Doctor.exists = originalMethods.doctorExists;
+    Appointment.find = originalMethods.appointmentFind;
+    DailyReportRun.findOneAndUpdate = originalMethods.reportFindOneAndUpdate;
+    DailyReportRun.create = originalMethods.reportCreate;
+    DailyReportRun.updateOne = originalMethods.reportUpdateOne;
+    ServiceLog.create = originalMethods.serviceLogCreate;
+    cron.schedule = originalMethods.schedule;
+    for (const name of settingNames) {
+      if (previousSettings[name] === undefined) delete process.env[name];
+      else process.env[name] = previousSettings[name];
+    }
+  }
+});
+
+test('midnight report emails an Excel attachment to the current doctor profile', async () => {
+  const settingNames = [
+    'SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_REQUIRE_TLS', 'SMTP_USER',
+    'SMTP_PASS', 'EMAIL_FROM', 'DAILY_REPORT_CRON'
+  ];
+  const previousSettings = Object.fromEntries(settingNames.map((name) => [name, process.env[name]]));
+  const Doctor = mongoose.models.Doctor;
+  const Appointment = mongoose.models.Appointment;
+  const DailyReportRun = mongoose.models.DailyReportRun;
+  const ServiceLog = mongoose.models.ServiceLog;
+  const originalMethods = {
+    doctorFindOne: Doctor.findOne,
+    doctorExists: Doctor.exists,
+    appointmentFind: Appointment.find,
+    reportFindOneAndUpdate: DailyReportRun.findOneAndUpdate,
+    reportCreate: DailyReportRun.create,
+    reportUpdateOne: DailyReportRun.updateOne,
+    serviceLogCreate: ServiceLog.create,
+    createTransport: nodemailer.createTransport,
+    schedule: cron.schedule
+  };
+  let scheduledJob;
+  let sentMail;
+  let completion;
+  for (const name of settingNames) process.env[name] = '';
+  Object.assign(process.env, {
+    SMTP_HOST: 'smtp.example.test',
+    SMTP_PORT: '587',
+    SMTP_USER: 'smtp-user',
+    SMTP_PASS: 'smtp-password',
+    EMAIL_FROM: 'reports@example.test'
+  });
+  cron.schedule = (expression, callback, options) => {
+    scheduledJob = { expression, callback, options };
+    return { stop() {} };
+  };
+  nodemailer.createTransport = (options) => ({
+    options,
+    async sendMail(message) { sentMail = message; return { messageId: 'test-report' }; }
+  });
+  Doctor.findOne = () => ({ lean: async () => ({
+    doctorId: 'email-tenant', clinicName: 'Email Clinic', email: 'current@example.test', isActive: true
+  }) });
+  Doctor.exists = async () => true;
+  Appointment.find = () => ({
+    sort() { return this; },
+    lean: async () => [{
+      details: { name: 'Test Patient', contactNumber: '+923001234567', majorSymptoms: 'Checkup' },
+      slotStart: new Date(Date.now() + 60 * 60 * 1000),
+      slotEnd: new Date(Date.now() + 90 * 60 * 1000),
+      status: 'booked'
+    }]
+  });
+  DailyReportRun.findOneAndUpdate = async () => null;
+  DailyReportRun.create = async () => ({});
+  DailyReportRun.updateOne = async (filter, update) => {
+    completion = { filter, update };
+    return { modifiedCount: 1 };
+  };
+  ServiceLog.create = async () => ({});
+
+  try {
+    startDailyReport({ doctorId: 'email-tenant', email: 'stale@example.test' });
+    assert.equal(scheduledJob.expression, '0 0 * * *');
+    await scheduledJob.callback();
+    assert.equal(sentMail.to, 'current@example.test');
+    assert.equal(sentMail.from, 'reports@example.test');
+    assert.match(sentMail.subject, /Email Clinic Daily Appointments/);
+    assert.equal(sentMail.attachments[0].contentType,
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(sentMail.attachments[0].content);
+    assert.equal(workbook.worksheets[0].getRow(2).getCell(1).value, 'Test Patient');
+    assert.equal(workbook.worksheets[0].getRow(2).getCell(5).value, 'booked');
+    assert.equal(completion.update.$set.status, 'sent');
+  } finally {
+    Doctor.findOne = originalMethods.doctorFindOne;
+    Doctor.exists = originalMethods.doctorExists;
+    Appointment.find = originalMethods.appointmentFind;
+    DailyReportRun.findOneAndUpdate = originalMethods.reportFindOneAndUpdate;
+    DailyReportRun.create = originalMethods.reportCreate;
+    DailyReportRun.updateOne = originalMethods.reportUpdateOne;
+    ServiceLog.create = originalMethods.serviceLogCreate;
+    nodemailer.createTransport = originalMethods.createTransport;
+    cron.schedule = originalMethods.schedule;
+    for (const name of settingNames) {
+      if (previousSettings[name] === undefined) delete process.env[name];
+      else process.env[name] = previousSettings[name];
+    }
+  }
+});
+
+test('WhatsApp dashboard routes are doctor-scoped and return browser QR state', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'whatsapp-dashboard-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalFindById = DashboardUser.findById;
+  const originalDoctorFindOne = Doctor.findOne;
+  const user = { _id: 'whatsapp-user', role: 'DOCTOR', doctorId: 'clinic-whatsapp', isActive: true };
+  let startedDoctorId;
+  DashboardUser.findById = () => ({ lean: async () => user });
+  Doctor.findOne = () => ({ lean: async () => ({ doctorId: user.doctorId, isActive: true }) });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    const qrState = { status: 'qr', qrDataUrl: 'data:image/png;base64,tenant-qr' };
+    mountDashboard(app, {}, 'Asia/Karachi', user.doctorId, {
+      async startWhatsAppConnection(doctorId) {
+        startedDoctorId = doctorId;
+        return { status: 'starting' };
+      },
+      getWhatsAppConnectionStatus: (doctorId) => doctorId === user.doctorId ? qrState : { status: 'disconnected' }
+    });
+    const token = createSessionToken(user, secret, Date.now() + 60_000);
+    const request = { headers: { cookie: `doctorbot_dashboard=${token}` } };
+    const response = {
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    };
+    const [connectAuth, connectHandler] = routes.get('POST /api/dashboard/whatsapp/connect');
+    await connectAuth(request, response, () => {});
+    await connectHandler(request, response);
+    assert.equal(startedDoctorId, user.doctorId);
+    assert.equal(response.statusCode, 202);
+
+    response.locals = {};
+    const [statusAuth, statusHandler] = routes.get('GET /api/dashboard/whatsapp/status');
+    await statusAuth(request, response, () => {});
+    statusHandler(request, response);
+    assert.deepEqual(response.body, qrState);
+  } finally {
+    DashboardUser.findById = originalFindById;
+    Doctor.findOne = originalDoctorFindOne;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
 test('Excel report contains the requested patient columns and data', async () => {
   const workbookBuffer = await generateAppointmentsWorkbook([{
     details: {
@@ -235,16 +453,18 @@ test('Excel report contains the requested patient columns and data', async () =>
       majorSymptoms: 'Sample symptom'
     },
     slotStart: new Date('2026-10-03T05:00:00Z'),
-    slotEnd: new Date('2026-10-03T05:30:00Z')
+    slotEnd: new Date('2026-10-03T05:30:00Z'),
+    status: 'booked'
   }], 'Asia/Karachi');
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(workbookBuffer);
   const sheet = workbook.worksheets[0];
   assert.deepEqual(sheet.getRow(1).values.slice(1), [
-    'Patient Name', 'WhatsApp Number', 'Symptoms', 'Appointment Slot'
+    'Patient Name', 'WhatsApp Number', 'Symptoms', 'Appointment Slot', 'Status'
   ]);
   assert.equal(sheet.getRow(2).getCell(1).value, 'Sample Patient');
   assert.equal(sheet.getRow(2).getCell(3).value, 'Sample symptom');
+  assert.equal(sheet.getRow(2).getCell(5).value, 'booked');
 });
 
 test('first-message greetings are deterministic and include ordered facilities', () => {

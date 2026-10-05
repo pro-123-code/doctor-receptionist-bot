@@ -1,10 +1,13 @@
 require('dotenv').config();
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const fsPromises = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
 const { google } = require('googleapis');
 const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const mongoose = require('mongoose');
 const { Appointment, connectDatabase, deleteConversation, Doctor, getConversation, recordServiceLog, saveConversation } = require('./models');
 const { extractPatientField, extractSlotNumber } = require('./gemini');
@@ -23,6 +26,7 @@ const bookingLocks = new Map();
 const conversationLocks = new Map();
 const activeReminders = new Map();
 const whatsappSockets = new Map();
+const whatsappConnectionStates = new Map();
 const startingDoctorIds = new Set();
 
 const clinicId = process.env.CLINIC_ID || process.env.DOCTOR_ID;
@@ -86,7 +90,10 @@ app.get('/dashboard-sw.js', (_request, response) => {
   response.type('application/javascript').sendFile(path.join(__dirname, 'dashboard-sw.js'));
 });
 
-mountDashboard(app, Appointment, timeZone, doctorId);
+mountDashboard(app, Appointment, timeZone, doctorId, {
+  startWhatsAppConnection: connectDoctorWhatsApp,
+  getWhatsAppConnectionStatus
+});
 
 function logServiceError(operation, error, sensitiveValues = [], targetDoctorId = doctorId) {
   const isCalendarOperation = /^Calendar\b/.test(operation);
@@ -698,20 +705,57 @@ async function handleConversationMessageSerially(sender, message, doctorProfile)
   }
 }
 
+function getWhatsAppConnectionStatus(targetDoctorId) {
+  return whatsappConnectionStates.get(targetDoctorId) || { status: 'disconnected' };
+}
+
+function getWhatsAppAuthDirectory(targetDoctorId) {
+  if (!/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(targetDoctorId)) {
+    throw new Error('Invalid doctor ID for WhatsApp session storage');
+  }
+  const localDataRoot = process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share');
+  const configuredRoot = process.env.BAILEYS_AUTH_DIR || path.join(localDataRoot, 'DoctorBot', 'sessions');
+  const sessionDirectory = path.resolve(configuredRoot, `doctor_${targetDoctorId}`);
+  const legacyDirectory = path.join(__dirname, '..', 'auth_info_baileys', targetDoctorId);
+  if (!fs.existsSync(path.join(sessionDirectory, 'creds.json')) &&
+    fs.existsSync(path.join(legacyDirectory, 'creds.json'))) {
+    return legacyDirectory;
+  }
+  return sessionDirectory;
+}
+
+async function secureWhatsAppAuthDirectory(authDirectory) {
+  await fsPromises.mkdir(authDirectory, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') await fsPromises.chmod(authDirectory, 0o700);
+}
+
+async function connectDoctorWhatsApp(targetDoctorId) {
+  const doctorProfile = await Doctor.findOne({ doctorId: targetDoctorId, isActive: true })
+    .select('+googleCredentialsEncrypted').lean();
+  if (!doctorProfile) throw new Error('Doctor account is inactive');
+  await startDoctorWhatsApp(doctorProfile);
+  return getWhatsAppConnectionStatus(targetDoctorId);
+}
+
 app.use((_request, response) => {
   response.status(404).json({ error: 'Not found' });
 });
 
 async function startDoctorWhatsApp(doctorProfile) {
-  if (!doctorProfile.isActive || whatsappSockets.has(doctorProfile.doctorId) || startingDoctorIds.has(doctorProfile.doctorId)) return;
-  startingDoctorIds.add(doctorProfile.doctorId);
+  const targetDoctorId = doctorProfile.doctorId;
+  if (!doctorProfile.isActive || whatsappSockets.has(targetDoctorId) || startingDoctorIds.has(targetDoctorId)) return;
+  startingDoctorIds.add(targetDoctorId);
+  whatsappConnectionStates.set(targetDoctorId, { status: 'starting' });
 
-  const configuredAuthDirectory = process.env.BAILEYS_AUTH_DIR || 'auth_info_baileys';
-  const authDirectory = path.join(configuredAuthDirectory, doctorProfile.doctorId);
+  const authDirectory = getWhatsAppAuthDirectory(targetDoctorId);
   let socket;
   let saveCreds;
   try {
-    if (!await Doctor.exists({ doctorId: doctorProfile.doctorId, isActive: true })) return;
+    if (!await Doctor.exists({ doctorId: targetDoctorId, isActive: true })) {
+      whatsappConnectionStates.set(targetDoctorId, { status: 'disconnected' });
+      return;
+    }
+    await secureWhatsAppAuthDirectory(authDirectory);
     const authState = await useMultiFileAuthState(authDirectory);
     saveCreds = authState.saveCreds;
     socket = makeWASocket({
@@ -720,18 +764,30 @@ async function startDoctorWhatsApp(doctorProfile) {
       markOnlineOnConnect: false,
       syncFullHistory: false
     });
-    whatsappSockets.set(doctorProfile.doctorId, socket);
+    whatsappSockets.set(targetDoctorId, socket);
+  } catch (error) {
+    whatsappConnectionStates.set(targetDoctorId, { status: 'error' });
+    throw error;
   } finally {
-    startingDoctorIds.delete(doctorProfile.doctorId);
+    startingDoctorIds.delete(targetDoctorId);
   }
 
   socket.ev.on('creds.update', saveCreds);
   socket.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr) {
-      console.log(`Scan WhatsApp QR for doctor ${doctorProfile.doctorId}.`);
-      qrcode.generate(qr, { small: true });
+      const state = { status: 'qr', qrDataUrl: null };
+      whatsappConnectionStates.set(targetDoctorId, state);
+      QRCode.toDataURL(qr, { errorCorrectionLevel: 'M', margin: 2, width: 320 })
+        .then((qrDataUrl) => {
+          if (whatsappConnectionStates.get(targetDoctorId) === state) state.qrDataUrl = qrDataUrl;
+        })
+        .catch((error) => {
+          whatsappConnectionStates.set(targetDoctorId, { status: 'error' });
+          logServiceError('WhatsApp QR generation', error, [], targetDoctorId);
+        });
     }
     if (connection === 'open') {
+      whatsappConnectionStates.set(targetDoctorId, { status: 'connected' });
       console.log(`WhatsApp connection ready for doctor ${doctorProfile.doctorId}.`);
       restoreAppointmentReminders(doctorProfile).catch((error) =>
         logServiceError('Reminder restoration', error, [], doctorProfile.doctorId));
@@ -742,10 +798,12 @@ async function startDoctorWhatsApp(doctorProfile) {
       }
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       if (statusCode !== DisconnectReason.loggedOut) {
+        whatsappConnectionStates.set(targetDoctorId, { status: 'reconnecting' });
         console.log(`WhatsApp connection closed for doctor ${doctorProfile.doctorId}; reconnecting.`);
         setTimeout(() => startDoctorWhatsApp(doctorProfile).catch((error) =>
           logServiceError('WhatsApp reconnect', error, [], doctorProfile.doctorId)), 3000).unref();
       } else {
+        whatsappConnectionStates.set(targetDoctorId, { status: 'loggedOut' });
         console.error(`WhatsApp logged out for doctor ${doctorProfile.doctorId}. Re-link that clinic's number.`);
       }
     }
@@ -800,8 +858,13 @@ async function synchronizeDoctorWorkers() {
 
   for (const doctorProfile of activeDoctors) {
     if (!whatsappSockets.has(doctorProfile.doctorId)) {
-      startDoctorWhatsApp(doctorProfile).catch((error) =>
-        logServiceError('WhatsApp startup', error, [], doctorProfile.doctorId));
+      const authDirectory = getWhatsAppAuthDirectory(doctorProfile.doctorId);
+      if (fs.existsSync(path.join(authDirectory, 'creds.json'))) {
+        startDoctorWhatsApp(doctorProfile).catch((error) =>
+          logServiceError('WhatsApp startup', error, [], doctorProfile.doctorId));
+      } else if (!whatsappConnectionStates.has(doctorProfile.doctorId)) {
+        whatsappConnectionStates.set(doctorProfile.doctorId, { status: 'disconnected' });
+      }
     }
     if (!doctorReportTasks.has(doctorProfile.doctorId)) {
       try {

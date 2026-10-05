@@ -142,7 +142,7 @@ function isGoogleCalendarOAuthAvailable() {
     process.env.GOOGLE_REDIRECT_URI && hasValidEncryptionKey());
 }
 
-function mountDashboard(app, Appointment, timeZone, clinicId) {
+function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection = {}) {
   app.use('/api/dashboard', (_request, response, next) => {
     response.set('Cache-Control', 'no-store, private');
     next();
@@ -373,6 +373,32 @@ function mountDashboard(app, Appointment, timeZone, clinicId) {
       calendarOAuthAvailable: isGoogleCalendarOAuthAvailable(),
       googleCalendarId: doctor.googleCalendarId
     });
+  });
+
+  app.post('/api/dashboard/whatsapp/connect', requireDashboardAuth, async (_request, response) => {
+    const user = response.locals.dashboardUser;
+    if (user.role !== 'DOCTOR' || !user.doctorId) {
+      return response.status(403).json({ error: 'Doctor access required' });
+    }
+    if (typeof whatsappConnection.startWhatsAppConnection !== 'function') {
+      return response.status(503).json({ error: 'WhatsApp connection is unavailable' });
+    }
+    try {
+      const state = await whatsappConnection.startWhatsAppConnection(user.doctorId);
+      response.status(202).json(state || { status: 'starting' });
+    } catch (error) {
+      console.error(`WhatsApp connection start failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'WhatsApp connection could not be started' });
+    }
+  });
+
+  app.get('/api/dashboard/whatsapp/status', requireDashboardAuth, (_request, response) => {
+    const user = response.locals.dashboardUser;
+    if (user.role !== 'DOCTOR' || !user.doctorId) {
+      return response.status(403).json({ error: 'Doctor access required' });
+    }
+    const state = whatsappConnection.getWhatsAppConnectionStatus?.(user.doctorId) || { status: 'disconnected' };
+    response.json({ status: state.status, qrDataUrl: state.qrDataUrl || null });
   });
 
   app.put('/api/dashboard/settings', requireDashboardAuth, async (request, response) => {
