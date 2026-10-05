@@ -16,6 +16,7 @@ const { getWelcomeMessage } = require('./greetings');
 const { decryptJson } = require('./secretBox');
 
 const app = express();
+app.set('trust proxy', 1);
 const port = Number.parseInt(process.env.PORT || '3000', 10);
 app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
 const bookingLocks = new Map();
