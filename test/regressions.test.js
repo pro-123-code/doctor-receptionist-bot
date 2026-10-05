@@ -6,7 +6,10 @@ const { google } = require('googleapis');
 const cron = require('node-cron');
 const nodemailer = require('nodemailer');
 const { getLocalDayBounds, parseRequestedDate } = require('../src/dateParser');
-const { isClinicOpenOnDate, normalizeOffDays, normalizeWorkingDays } = require('../src/clinicSchedule');
+const { getReligiousHoliday, isClinicOpenOnDate, normalizeOffDays, normalizeWorkingDays } = require('../src/clinicSchedule');
+const { enqueueInboundMessage, drainInboundQueue, getReceivedAt, messageRetentionMs } = require('../src/messageQueue');
+const { syncReligiousHolidayEvents } = require('../src/religiousCalendar');
+const { getVoiceFileExtension, translateVoiceMessageToEnglish } = require('../src/voiceTranscription');
 const { createGoogleOAuthState, createSessionToken, mountDashboard, verifyGoogleOAuthState, verifySessionToken } = require('../src/dashboard');
 const { generateAppointmentsWorkbook } = require('../src/excelGenerator');
 const { getCalendarErrorDetails } = require('../src/calendarErrors');
@@ -76,6 +79,215 @@ test('doctor schedules honor configured workdays and date-specific off-days', ()
   assert.equal(normalizeWorkingDays([]), null);
   assert.deepEqual(normalizeOffDays(['2026-12-25', '2026-12-25']), ['2026-12-25']);
   assert.equal(normalizeOffDays(['2026-02-30']), null);
+});
+
+test('religion-specific holidays automatically close a clinic schedule', () => {
+  const allDays = [0, 1, 2, 3, 4, 5, 6];
+  const datesByReligion = [
+    ['Muslim', { year: 2026, month: 3, day: 20 }],
+    ['Christian', { year: 2026, month: 4, day: 5 }],
+    ['Hindu', { year: 2026, month: 3, day: 3 }],
+    ['Hindu', { year: 2026, month: 11, day: 8 }]
+  ];
+  for (const [religion, date] of datesByReligion) {
+    const dateKey = `${date.year}-${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`;
+    assert.ok(getReligiousHoliday(religion, dateKey));
+    assert.equal(isClinicOpenOnDate(date, { religion, workingDays: allDays, offDays: [] }), false);
+  }
+  assert.equal(isClinicOpenOnDate({ year: 2026, month: 12, day: 25 }, {
+    religion: 'Other', workingDays: allDays, offDays: []
+  }), true);
+});
+
+test('religious holiday calendar sync adds all-day events and removes obsolete future dates', async () => {
+  const profile = {
+    doctorId: 'holiday-tenant',
+    religion: 'Christian',
+    clinicName: 'Holiday Clinic',
+    googleCalendarId: 'primary',
+    religiousHolidayEvents: [
+      { eventId: 'past-event', date: '2025-12-25', religion: 'Muslim' },
+      { eventId: 'obsolete-event', date: '2026-12-25', religion: 'Muslim' }
+    ]
+  };
+  const insertedEvents = [];
+  const deletedEvents = [];
+  let saved;
+  const calendar = {
+    events: {
+      async insert(event) { insertedEvents.push(event); },
+      async delete(event) { deletedEvents.push(event); }
+    }
+  };
+  const Doctor = {
+    async updateOne(filter, update) {
+      assert.equal(filter.doctorId, profile.doctorId);
+      saved = update.$set.religiousHolidayEvents;
+    }
+  };
+  const getReligiousHolidays = (religion, year) => religion === 'Christian' && year === 2026
+    ? [{ date: '2026-04-05', name: 'Easter Sunday' }]
+    : [];
+  await syncReligiousHolidayEvents({
+    doctorProfile: profile,
+    Doctor,
+    calendar,
+    getReligiousHolidays,
+    timeZone: 'Asia/Karachi',
+    now: new Date('2026-01-01T00:00:00Z')
+  });
+  assert.equal(deletedEvents.length, 1);
+  assert.equal(deletedEvents[0].eventId, 'obsolete-event');
+  assert.equal(insertedEvents.length, 1);
+  assert.equal(insertedEvents[0].requestBody.summary, 'Holiday Clinic closed: Easter Sunday');
+  assert.deepEqual(insertedEvents[0].requestBody.start, { date: '2026-04-05' });
+  assert.deepEqual(insertedEvents[0].requestBody.end, { date: '2026-04-06' });
+  assert.ok(saved.some((event) => event.eventId === 'past-event'));
+  assert.ok(saved.some((event) => event.date === '2026-04-05' && event.religion === 'Christian'));
+});
+
+test('inbound messages are tenant-deduplicated and retain their 24-hour expiry', async () => {
+  let query;
+  let inserted;
+  const MessageModel = {
+    async findOneAndUpdate(filter, update, options) {
+      query = { filter, update, options };
+      inserted = { ...update.$setOnInsert, _id: 'queue-message' };
+      return inserted;
+    }
+  };
+  const receivedAt = new Date('2026-10-06T00:00:00Z');
+  await enqueueInboundMessage(MessageModel, {
+    doctorId: 'queue-tenant',
+    senderJid: 'patient@s.whatsapp.net',
+    messageId: 'whatsapp-message-id',
+    messageType: 'text',
+    text: 'Hello',
+    receivedAt
+  });
+  assert.deepEqual(query.filter, { doctorId: 'queue-tenant', messageId: 'whatsapp-message-id' });
+  assert.equal(query.options.upsert, true);
+  assert.equal(inserted.expiresAt.getTime() - receivedAt.getTime(), messageRetentionMs);
+  assert.equal(getReceivedAt(1_791_244_800).getTime(), 1_791_244_800_000);
+});
+
+test('inbound backlog drains in receipt order and expires messages older than 24 hours', async () => {
+  const now = Date.parse('2026-10-06T12:00:00Z');
+  const records = [
+    { _id: 'later', doctorId: 'queue-tenant', senderJid: 'patient', receivedAt: new Date(now - 1000), status: 'pending', attemptCount: 0, text: 'later' },
+    { _id: 'expired', doctorId: 'queue-tenant', senderJid: 'patient', receivedAt: new Date(now - messageRetentionMs - 1), status: 'pending', attemptCount: 0, text: 'old' },
+    { _id: 'earlier', doctorId: 'queue-tenant', senderJid: 'patient', receivedAt: new Date(now - 2000), status: 'pending', attemptCount: 0, text: 'earlier' }
+  ];
+  const MessageModel = {
+    async updateMany(filter, update) {
+      for (const record of records) {
+        if (record.receivedAt < filter.receivedAt.$lt && ['pending', 'processing'].includes(record.status)) {
+          Object.assign(record, update.$set);
+          for (const key of Object.keys(update.$unset || {})) delete record[key];
+        }
+      }
+    },
+    async findOneAndUpdate(filter, update, options) {
+      assert.equal(filter.doctorId, 'queue-tenant');
+      assert.deepEqual(options.sort, { queuedAt: 1, _id: 1 });
+      const message = records.filter((record) => record.status === 'pending' && record.receivedAt >= filter.receivedAt.$gte)
+        .sort((left, right) => left.receivedAt - right.receivedAt || left._id.localeCompare(right._id))[0];
+      if (!message) return null;
+      Object.assign(message, update.$set);
+      message.attemptCount += update.$inc.attemptCount;
+      return message;
+    },
+    async updateOne(filter, update) {
+      const message = records.find(({ _id }) => _id === filter._id);
+      if (filter.status && message.status !== filter.status) return { matchedCount: 0 };
+      Object.assign(message, update.$set);
+      for (const key of Object.keys(update.$unset || {})) delete message[key];
+      return { matchedCount: 1 };
+    }
+  };
+  const QueueLockModel = {
+    async findOneAndUpdate() { return null; },
+    async create(lock) { return lock; },
+    async updateOne() {}
+  };
+  const delivered = [];
+  const processed = await drainInboundQueue({
+    MessageModel,
+    QueueLockModel,
+    doctorId: 'queue-tenant',
+    canProcess: () => true,
+    processMessage: async ({ text }) => text,
+    deliverReply: async (_sender, text) => delivered.push(text),
+    responseDelayMs: 0,
+    now: () => now
+  });
+  assert.equal(processed, 2);
+  assert.deepEqual(delivered, ['earlier', 'later']);
+  assert.equal(records.find(({ _id }) => _id === 'expired').status, 'expired');
+  assert.equal(records.find(({ _id }) => _id === 'earlier').status, 'completed');
+});
+
+test('inbound queue retains a prepared reply if WhatsApp disconnects before delivery', async () => {
+  const message = {
+    _id: 'disconnect-message', doctorId: 'queue-tenant', senderJid: 'patient',
+    receivedAt: new Date(), status: 'pending', attemptCount: 0, text: 'hello'
+  };
+  let connectionReady = true;
+  let retryRequested;
+  const MessageModel = {
+    async updateMany() {},
+    async findOneAndUpdate(_filter, update) {
+      if (message.status !== 'pending') return null;
+      Object.assign(message, update.$set);
+      message.attemptCount += update.$inc.attemptCount;
+      return message;
+    },
+    async updateOne(_filter, update) {
+      if (_filter.status && message.status !== _filter.status) return { matchedCount: 0 };
+      Object.assign(message, update.$set);
+      for (const key of Object.keys(update.$unset || {})) delete message[key];
+      return { matchedCount: 1 };
+    }
+  };
+  const QueueLockModel = {
+    async findOneAndUpdate() { return null; },
+    async create(lock) { return lock; },
+    async updateOne() {}
+  };
+  await drainInboundQueue({
+    MessageModel,
+    QueueLockModel,
+    doctorId: 'queue-tenant',
+    canProcess: () => connectionReady,
+    async processMessage() { connectionReady = false; return 'response'; },
+    async deliverReply() { assert.fail('must not send after disconnect'); },
+    async onFailure(_error, _record, retry) { retryRequested = retry; },
+    responseDelayMs: 0
+  });
+  assert.equal(message.status, 'replying');
+  assert.equal(message.responseText, 'response');
+  assert.equal(retryRequested, true);
+});
+
+test('Urdu voice translation uses the configured Whisper translation endpoint', async () => {
+  assert.deepEqual(getVoiceFileExtension('audio/ogg; codecs=opus'), { extension: 'ogg', mime: 'audio/ogg' });
+  await assert.rejects(
+    translateVoiceMessageToEnglish(Buffer.from('voice'), 'audio/ogg', {}),
+    (error) => error.code === 'VOICE_TRANSCRIPTION_NOT_ENABLED'
+  );
+  let request;
+  const transcript = await translateVoiceMessageToEnglish(
+    Buffer.from('voice'),
+    'audio/ogg; codecs=opus',
+    { OPENAI_ALLOW_PHI_PROCESSING: 'true', OPENAI_API_KEY: 'test-key' },
+    async (url, options) => {
+      request = { url, options };
+      return { ok: true, async json() { return { text: 'Please book an appointment tomorrow.' }; } };
+    }
+  );
+  assert.equal(request.url, 'https://api.openai.com/v1/audio/translations');
+  assert.equal(request.options.headers.Authorization, 'Bearer test-key');
+  assert.equal(transcript, 'Please book an appointment tomorrow.');
 });
 
 test('Gemini extraction instructions require schema-only output', () => {
@@ -195,6 +407,8 @@ test('tenant data and report locks use clinic-scoped unique indexes', () => {
   const Appointment = mongoose.models.Appointment;
   const DailyReportRun = mongoose.models.DailyReportRun;
   const DashboardLoginAttempt = mongoose.models.DashboardLoginAttempt;
+  const InboundMessage = mongoose.models.InboundMessage;
+  const InboundQueueLock = mongoose.models.InboundQueueLock;
   assert.ok(Conversation.schema.indexes().some(([keys, options]) =>
     keys.doctorId && keys.senderJid && options.unique
   ));
@@ -204,6 +418,13 @@ test('tenant data and report locks use clinic-scoped unique indexes', () => {
   assert.ok(DailyReportRun.schema.indexes().some(([keys, options]) =>
     keys.doctorId && keys.dateKey && options.unique
   ));
+  assert.ok(InboundMessage.schema.indexes().some(([keys, options]) =>
+    keys.doctorId && keys.messageId && options.unique
+  ));
+  assert.ok(InboundMessage.schema.indexes().some(([keys, options]) =>
+    keys.expiresAt && options.expireAfterSeconds === 0
+  ));
+  assert.ok(InboundQueueLock.schema.path('doctorId').options.unique);
   assert.ok(DashboardLoginAttempt.schema.path('bucketKey').options.unique);
   assert.deepEqual(mongoose.models.DashboardUser.schema.path('role').enumValues, ['SUPERADMIN', 'DOCTOR']);
 });
@@ -527,6 +748,7 @@ test('clinic setup saves tenant schedule and gates WhatsApp pairing', async () =
         consultationDetails: 'Appointments required.',
         workingDays: [6, 1, 6],
         offDays: ['2026-12-25'],
+        religion: 'Muslim',
         welcomeMessage: 'Welcome.'
       }
     };
@@ -553,6 +775,7 @@ test('clinic setup saves tenant schedule and gates WhatsApp pairing', async () =
     assert.deepEqual(savedUpdate.$set.workingDays, [1, 6]);
     assert.deepEqual(savedUpdate.$set.offDays, ['2026-12-25']);
     assert.deepEqual(savedUpdate.$set.servicesList, ['Vaccination']);
+    assert.equal(savedUpdate.$set.religion, 'Muslim');
 
     response = makeResponse();
     await connectAuth(request, response, () => {});

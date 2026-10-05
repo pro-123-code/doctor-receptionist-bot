@@ -57,6 +57,7 @@
         <form id="doctor-settings-form" class="row g-3">
           <div class="col-sm-6"><label class="form-label" for="profile-doctor-name">Doctor name</label><input id="profile-doctor-name" class="form-control" required maxlength="120"></div>
           <div class="col-sm-6"><label class="form-label" for="profile-clinic-name">Clinic name</label><input id="profile-clinic-name" class="form-control" required maxlength="160"></div>
+          <div class="col-sm-6"><label class="form-label" for="profile-religion">Religion</label><select id="profile-religion" class="form-select" required><option value="Christian">Christian</option><option value="Muslim">Muslim</option><option value="Hindu">Hindu</option><option value="Other">Other</option></select></div>
           <div class="col-md-6"><label class="form-label" for="profile-facilities">Facilities (one per line)</label><textarea id="profile-facilities" class="form-control" rows="4" required></textarea></div>
           <div class="col-md-6"><label class="form-label" for="profile-services">Treatments and services (one per line)</label><textarea id="profile-services" class="form-control" rows="4" required></textarea></div>
           <div class="col-12"><label class="form-label" for="profile-consultation-details">Consultation details</label><textarea id="profile-consultation-details" class="form-control" rows="3" maxlength="2000" required></textarea></div>
@@ -271,6 +272,7 @@
       const settings = await response.json();
       document.querySelector('#profile-doctor-name').value = settings.doctorName;
       document.querySelector('#profile-clinic-name').value = settings.clinicName;
+      document.querySelector('#profile-religion').value = settings.religion || 'Other';
       document.querySelector('#profile-facilities').value = settings.facilitiesList.join('\n');
       document.querySelector('#profile-services').value = (settings.servicesList || []).join('\n');
       document.querySelector('#profile-consultation-details').value = settings.consultationDetails || '';
@@ -418,6 +420,7 @@
       const payload = {
         doctorName: document.querySelector('#profile-doctor-name').value,
         clinicName: document.querySelector('#profile-clinic-name').value,
+        religion: document.querySelector('#profile-religion').value,
         facilitiesList: document.querySelector('#profile-facilities').value.split('\n').map((item) => item.trim()).filter(Boolean),
         servicesList: document.querySelector('#profile-services').value.split('\n').map((item) => item.trim()).filter(Boolean),
         consultationDetails: document.querySelector('#profile-consultation-details').value,

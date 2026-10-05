@@ -87,6 +87,39 @@ const dailyReportRunSchema = new Schema({
 }, { timestamps: true, versionKey: false });
 dailyReportRunSchema.index({ doctorId: 1, dateKey: 1 }, { unique: true });
 
+const inboundMessageSchema = new Schema({
+  doctorId: { type: String, required: true },
+  senderJid: { type: String, required: true },
+  messageId: { type: String, required: true },
+  messageType: { type: String, enum: ['text', 'audio'], required: true },
+  text: { type: String, maxlength: 10000 },
+  audioData: { type: Buffer },
+  audioMimeType: { type: String, maxlength: 100 },
+  receivedAt: { type: Date, required: true },
+  queuedAt: { type: Date, required: true, default: Date.now },
+  status: { type: String, enum: ['pending', 'processing', 'replying', 'completed', 'expired', 'failed'], default: 'pending', required: true },
+  responseText: { type: String, maxlength: 10000 },
+  processingStartedAt: { type: Date },
+  processedAt: { type: Date },
+  attemptCount: { type: Number, default: 0, min: 0 },
+  lastErrorCode: { type: String, maxlength: 64 },
+  expiresAt: { type: Date, required: true, expires: 0 }
+}, { timestamps: true, versionKey: false });
+inboundMessageSchema.index({ doctorId: 1, messageId: 1 }, { unique: true });
+inboundMessageSchema.index({ doctorId: 1, status: 1, queuedAt: 1, _id: 1 });
+
+const inboundQueueLockSchema = new Schema({
+  doctorId: { type: String, required: true, unique: true },
+  ownerToken: { type: String, required: true },
+  lockExpiresAt: { type: Date, required: true }
+}, { versionKey: false });
+
+const religiousHolidayEventSchema = new Schema({
+  eventId: { type: String, required: true },
+  date: { type: String, required: true },
+  religion: { type: String, enum: ['Christian', 'Muslim', 'Hindu', 'Other'], required: true }
+}, { _id: false });
+
 const doctorSchema = new Schema({
   doctorId: { type: String, required: true, unique: true },
   doctorName: { type: String, required: true, maxlength: 120, default: 'Doctor' },
@@ -97,6 +130,8 @@ const doctorSchema = new Schema({
   consultationDetails: { type: String, maxlength: 2000, default: '' },
   workingDays: { type: [Number], enum: [0, 1, 2, 3, 4, 5, 6], default: [1, 2, 3, 4, 5] },
   offDays: { type: [String], default: [] },
+  religion: { type: String, enum: ['Christian', 'Muslim', 'Hindu', 'Other'], default: 'Other' },
+  religiousHolidayEvents: { type: [religiousHolidayEventSchema], default: [] },
   setupComplete: { type: Boolean, default: false },
   welcomeMessage: { type: String, maxlength: 1000, default: '' },
   isActive: { type: Boolean, default: true },
@@ -124,6 +159,8 @@ const Appointment = mongoose.models.Appointment || mongoose.model('Appointment',
 const ServiceLog = mongoose.models.ServiceLog || mongoose.model('ServiceLog', serviceLogSchema);
 const DashboardLoginAttempt = mongoose.models.DashboardLoginAttempt || mongoose.model('DashboardLoginAttempt', dashboardLoginAttemptSchema);
 const DailyReportRun = mongoose.models.DailyReportRun || mongoose.model('DailyReportRun', dailyReportRunSchema);
+const InboundMessage = mongoose.models.InboundMessage || mongoose.model('InboundMessage', inboundMessageSchema);
+const InboundQueueLock = mongoose.models.InboundQueueLock || mongoose.model('InboundQueueLock', inboundQueueLockSchema);
 const Doctor = mongoose.models.Doctor || mongoose.model('Doctor', doctorSchema);
 const DashboardUser = mongoose.models.DashboardUser || mongoose.model('DashboardUser', dashboardUserSchema);
 
@@ -196,6 +233,8 @@ async function connectDatabase(uri, clinicId, doctorId = clinicId) {
     ServiceLog.init(),
     DashboardLoginAttempt.init(),
     DailyReportRun.init(),
+    InboundMessage.init(),
+    InboundQueueLock.init(),
     Doctor.init(),
     DashboardUser.init()
   ]);
@@ -366,6 +405,8 @@ async function deleteConversation(senderJid, doctorId = process.env.DOCTOR_ID ||
 
 module.exports = {
   Appointment,
+  InboundMessage,
+  InboundQueueLock,
   claimDailyReportRun,
   completeDailyReportRun,
   DashboardUser,

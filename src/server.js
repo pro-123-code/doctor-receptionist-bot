@@ -6,10 +6,10 @@ const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
 const { google } = require('googleapis');
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const mongoose = require('mongoose');
-const { Appointment, connectDatabase, deleteConversation, Doctor, getConversation, recordServiceLog, saveConversation } = require('./models');
+const { Appointment, connectDatabase, deleteConversation, Doctor, getConversation, InboundMessage, InboundQueueLock, recordServiceLog, saveConversation } = require('./models');
 const { extractPatientField, extractSlotNumber } = require('./gemini');
 const { getLocalDateParts, getLocalDayBounds, parseRequestedDate } = require('./dateParser');
 const { mountDashboard } = require('./dashboard');
@@ -17,7 +17,10 @@ const { startDailyReport } = require('./cronJobs');
 const { getCalendarErrorDetails } = require('./calendarErrors');
 const { getWelcomeMessage } = require('./greetings');
 const { decryptJson } = require('./secretBox');
-const { isClinicOpenOnDate } = require('./clinicSchedule');
+const { getReligiousHoliday, getReligiousHolidays, isClinicOpenOnDate } = require('./clinicSchedule');
+const { drainInboundQueue, enqueueInboundMessage, getMessageId, getReceivedAt } = require('./messageQueue');
+const { syncReligiousHolidayEvents } = require('./religiousCalendar');
+const { translateVoiceMessageToEnglish } = require('./voiceTranscription');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -29,6 +32,10 @@ const activeReminders = new Map();
 const whatsappSockets = new Map();
 const whatsappConnectionStates = new Map();
 const startingDoctorIds = new Set();
+const inboundEventChains = new Map();
+const processingDoctorQueues = new Map();
+const completedHolidaySyncs = new Set();
+const activeHolidaySyncs = new Map();
 
 const clinicId = process.env.CLINIC_ID || process.env.DOCTOR_ID;
 const doctorId = process.env.DOCTOR_ID || clinicId;
@@ -93,7 +100,8 @@ app.get('/dashboard-sw.js', (_request, response) => {
 
 mountDashboard(app, Appointment, timeZone, doctorId, {
   startWhatsAppConnection: connectDoctorWhatsApp,
-  getWhatsAppConnectionStatus
+  getWhatsAppConnectionStatus,
+  syncReligiousHolidays: syncDoctorReligiousHolidays
 });
 
 function logServiceError(operation, error, sensitiveValues = [], targetDoctorId = doctorId) {
@@ -141,6 +149,36 @@ function getCalendarClient(doctorProfile) {
   );
   auth.setCredentials({ refresh_token: credentials.refreshToken });
   return google.calendar({ version: 'v3', auth });
+}
+
+function syncDoctorReligiousHolidays(targetDoctorId) {
+  const activeSync = activeHolidaySyncs.get(targetDoctorId);
+  if (activeSync) return activeSync;
+
+  const sync = (async () => {
+    const doctorProfile = await Doctor.findOne({ doctorId: targetDoctorId, isActive: true })
+      .select('+googleCredentialsEncrypted').lean();
+    if (!doctorProfile?.googleCalendarConnected) return;
+
+    const currentYear = getLocalDateParts(new Date(), timeZone).year;
+    const syncKey = `${targetDoctorId}:${doctorProfile.religion}:${currentYear}`;
+    if (completedHolidaySyncs.has(syncKey)) return;
+    const calendar = getCalendarClient(doctorProfile);
+    await syncReligiousHolidayEvents({
+      doctorProfile,
+      Doctor,
+      calendar,
+      getReligiousHolidays,
+      timeZone
+    });
+    completedHolidaySyncs.add(syncKey);
+  })().catch((error) => {
+    logServiceError('Calendar religious holiday sync', error, [], targetDoctorId);
+    throw error;
+  }).finally(() => activeHolidaySyncs.delete(targetDoctorId));
+
+  activeHolidaySyncs.set(targetDoctorId, sync);
+  return sync;
 }
 
 function getTimeRange(requestedDate) {
@@ -518,7 +556,10 @@ function getClinicClosedReply(dateParts, doctorProfile) {
   const formattedDate = new Intl.DateTimeFormat('en-PK', {
     weekday: 'long', month: 'long', day: 'numeric', timeZone
   }).format(localDate);
-  return `Maazrat, ${doctorProfile.clinicName} ${formattedDate} ko band hai. Meherbani karke kisi aur working day ki tareekh batayein.`;
+  const dateKey = `${dateParts.year}-${String(dateParts.month).padStart(2, '0')}-${String(dateParts.day).padStart(2, '0')}`;
+  const holiday = getReligiousHoliday(doctorProfile.religion, dateKey);
+  const holidayLabel = holiday ? ` (${holiday.name})` : '';
+  return `Maazrat, ${doctorProfile.clinicName} ${formattedDate}${holidayLabel} ko band hai. Meherbani karke kisi aur working day ki tareekh batayein.`;
 }
 
 async function saveCalendarRetry(sender, conversation, doctorId) {
@@ -765,6 +806,122 @@ function getWhatsAppConnectionStatus(targetDoctorId) {
   return whatsappConnectionStates.get(targetDoctorId) || { status: 'disconnected' };
 }
 
+function unwrapWhatsAppMessageContent(content) {
+  let unwrapped = content;
+  for (const wrapper of ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'documentWithCaptionMessage']) {
+    if (unwrapped?.[wrapper]?.message) unwrapped = unwrapped[wrapper].message;
+  }
+  return unwrapped || {};
+}
+
+function isWhatsAppSocketReady(targetDoctorId, socket) {
+  return whatsappSockets.get(targetDoctorId) === socket &&
+    whatsappConnectionStates.get(targetDoctorId)?.status === 'connected';
+}
+
+function startDoctorQueueProcessor(doctorProfile, socket) {
+  const targetDoctorId = doctorProfile.doctorId;
+  if (!isWhatsAppSocketReady(targetDoctorId, socket) || processingDoctorQueues.has(targetDoctorId)) return;
+
+  const processQueue = async () => {
+    if (!isWhatsAppSocketReady(targetDoctorId, socket)) return 0;
+    const configuredDelay = Number.parseInt(process.env.WHATSAPP_QUEUE_RESPONSE_DELAY_MS || '1500', 10);
+    const responseDelayMs = Number.isFinite(configuredDelay)
+      ? Math.max(500, Math.min(60_000, configuredDelay))
+      : 1500;
+    return drainInboundQueue({
+      MessageModel: InboundMessage,
+      QueueLockModel: InboundQueueLock,
+      doctorId: targetDoctorId,
+      canProcess: () => isWhatsAppSocketReady(targetDoctorId, socket),
+      responseDelayMs,
+      async processMessage(message) {
+        let incomingText;
+        if (message.messageType === 'audio') {
+          if (!message.audioData?.length) throw Object.assign(new Error('WhatsApp voice media is unavailable'), { code: 'VOICE_MEDIA_UNAVAILABLE' });
+          incomingText = await translateVoiceMessageToEnglish(message.audioData, message.audioMimeType);
+        } else {
+          incomingText = message.text;
+        }
+        return handleConversationMessageSerially(message.senderJid, incomingText, doctorProfile);
+      },
+      async deliverReply(senderJid, text) {
+        await socket.sendMessage(senderJid, { text });
+      },
+      async onFailure(error, message, retry) {
+        logServiceError('WhatsApp message queue', error, [], targetDoctorId);
+        if (!retry && isWhatsAppSocketReady(targetDoctorId, socket)) {
+          await socket.sendMessage(message.senderJid, {
+            text: message.messageType === 'audio'
+              ? 'Maazrat, voice message samajhne mein mushkil hui. Meherbani karke apna paigham text mein bhejein.'
+              : 'Maazrat, aap ka paigham process karne mein mushkil hui. Meherbani karke dobara koshish karein.'
+          }).catch(() => {});
+        }
+      }
+    });
+  };
+
+  const processing = processQueue()
+    .catch((error) => logServiceError('WhatsApp queue drain', error, [], targetDoctorId))
+    .finally(async () => {
+      if (processingDoctorQueues.get(targetDoctorId) === processing) processingDoctorQueues.delete(targetDoctorId);
+      if (!isWhatsAppSocketReady(targetDoctorId, socket)) return;
+      try {
+        if (await InboundMessage.exists({ doctorId: targetDoctorId, status: 'pending' })) {
+          setTimeout(() => startDoctorQueueProcessor(doctorProfile, socket), 100).unref();
+        }
+      } catch (error) {
+        logServiceError('WhatsApp queue check', error, [], targetDoctorId);
+      }
+    });
+  processingDoctorQueues.set(targetDoctorId, processing);
+}
+
+async function enqueueWhatsAppMessages(doctorProfile, socket, messages) {
+  for (const message of messages) {
+    const senderJid = message.key?.remoteJid;
+    if (message.key?.fromMe || !senderJid || senderJid.endsWith('@g.us')) continue;
+
+    const content = unwrapWhatsAppMessageContent(message.message);
+    const audioMessage = content.audioMessage;
+    const text = content.conversation || content.extendedTextMessage?.text ||
+      content.imageMessage?.caption || content.videoMessage?.caption || content.documentMessage?.caption;
+    if (!audioMessage && typeof text !== 'string') continue;
+
+    let audioData;
+    let audioMimeType;
+    if (audioMessage) {
+      audioMimeType = audioMessage.mimetype || 'audio/ogg';
+      try {
+        const media = await downloadMediaMessage(message, 'buffer', {}, {
+          logger: { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this; } },
+          reuploadRequest: socket.updateMediaMessage.bind(socket)
+        });
+        if (Buffer.isBuffer(media) && media.length <= 24 * 1024 * 1024) audioData = media;
+      } catch (error) {
+        logServiceError('WhatsApp voice download', error, [], doctorProfile.doctorId);
+      }
+    }
+
+    try {
+      await enqueueInboundMessage(InboundMessage, {
+        doctorId: doctorProfile.doctorId,
+        senderJid,
+        messageId: getMessageId(message),
+        messageType: audioMessage ? 'audio' : 'text',
+        text: audioMessage ? undefined : text,
+        audioData,
+        audioMimeType,
+        receivedAt: getReceivedAt(message.messageTimestamp)
+      });
+    } catch (error) {
+      logServiceError('WhatsApp message persistence', error, [], doctorProfile.doctorId);
+      continue;
+    }
+  }
+  startDoctorQueueProcessor(doctorProfile, socket);
+}
+
 function getWhatsAppAuthDirectory(targetDoctorId) {
   if (!/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(targetDoctorId)) {
     throw new Error('Invalid doctor ID for WhatsApp session storage');
@@ -847,6 +1004,7 @@ async function startDoctorWhatsApp(doctorProfile) {
       console.log(`WhatsApp connection ready for doctor ${doctorProfile.doctorId}.`);
       restoreAppointmentReminders(doctorProfile).catch((error) =>
         logServiceError('Reminder restoration', error, [], doctorProfile.doctorId));
+      setTimeout(() => startDoctorQueueProcessor(doctorProfile, socket), 2500).unref();
     }
     if (connection === 'close') {
       if (whatsappSockets.get(doctorProfile.doctorId) === socket) {
@@ -865,34 +1023,17 @@ async function startDoctorWhatsApp(doctorProfile) {
     }
   });
 
-  socket.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-
-    for (const message of messages) {
-      const sender = message.key.remoteJid;
-      const incomingMessage = message.message?.conversation ||
-        message.message?.extendedTextMessage?.text;
-
-      if (message.key.fromMe || !sender || sender.endsWith('@g.us') || !incomingMessage) {
-        continue;
-      }
-
-      let reply;
-      try {
-        reply = await handleConversationMessageSerially(sender, incomingMessage, doctorProfile);
-      } catch (error) {
-        logServiceError('WhatsApp conversation', error, [], doctorProfile.doctorId);
-        reply = 'Maazrat, appointment check karne mein mushkil aa rahi hai. Meherbani karke thori dair baad dobara reply karein.';
-      }
-
-      if (!reply) continue;
-
-      try {
-        await socket.sendMessage(sender, { text: reply });
-      } catch (error) {
-        logServiceError('WhatsApp reply', error, [], doctorProfile.doctorId);
-      }
-    }
+  socket.ev.on('messages.upsert', ({ messages, type }) => {
+    if (!['notify', 'append'].includes(type)) return;
+    const targetDoctorId = doctorProfile.doctorId;
+    const previousBatch = inboundEventChains.get(targetDoctorId) || Promise.resolve();
+    const currentBatch = previousBatch
+      .then(() => enqueueWhatsAppMessages(doctorProfile, socket, messages))
+      .catch((error) => logServiceError('WhatsApp inbound batch', error, [], targetDoctorId));
+    inboundEventChains.set(targetDoctorId, currentBatch);
+    currentBatch.finally(() => {
+      if (inboundEventChains.get(targetDoctorId) === currentBatch) inboundEventChains.delete(targetDoctorId);
+    });
   });
 }
 
@@ -913,7 +1054,10 @@ async function synchronizeDoctorWorkers() {
   }
 
   for (const doctorProfile of activeDoctors) {
-    if (!whatsappSockets.has(doctorProfile.doctorId)) {
+    if (doctorProfile.googleCalendarConnected) {
+      syncDoctorReligiousHolidays(doctorProfile.doctorId).catch(() => {});
+    }
+    if (doctorProfile.setupComplete && !whatsappSockets.has(doctorProfile.doctorId)) {
       const authDirectory = getWhatsAppAuthDirectory(doctorProfile.doctorId);
       if (fs.existsSync(path.join(authDirectory, 'creds.json'))) {
         startDoctorWhatsApp(doctorProfile).catch((error) =>

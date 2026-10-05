@@ -300,6 +300,13 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         } }
       );
       if (update.matchedCount !== 1) return response.status(403).send('Doctor account is inactive.');
+      if (typeof whatsappConnection.syncReligiousHolidays === 'function') {
+        try {
+          await whatsappConnection.syncReligiousHolidays(user.doctorId);
+        } catch {
+          console.error('Religious holiday calendar sync failed (Error)');
+        }
+      }
       response.redirect('/dashboard?calendar=connected');
     } catch (error) {
       console.error(`Google OAuth callback failed (${error?.name || 'Error'})`);
@@ -374,6 +381,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       workingDays: doctor.workingDays || [1, 2, 3, 4, 5],
       offDays: doctor.offDays || [],
       setupComplete: doctor.setupComplete === true,
+      religion: doctor.religion || 'Other',
       welcomeMessage: doctor.welcomeMessage,
       googleCalendarConnected: doctor.googleCalendarConnected,
       calendarOAuthAvailable: isGoogleCalendarOAuthAvailable(),
@@ -418,7 +426,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     if (!doctor) return response.status(403).json({ error: 'Doctor access required' });
     const {
       doctorName, clinicName, facilitiesList, servicesList, consultationDetails,
-      workingDays, offDays, welcomeMessage
+      workingDays, offDays, religion, welcomeMessage
     } = request.body || {};
     const normalizedFacilities = normalizeFacilitiesList(facilitiesList);
     const normalizedServices = normalizeFacilitiesList(servicesList);
@@ -428,6 +436,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       typeof clinicName !== 'string' || !clinicName.trim() || clinicName.length > 160 ||
       !normalizedFacilities || !normalizedServices || !normalizedWorkingDays || !normalizedOffDays ||
       typeof consultationDetails !== 'string' || !consultationDetails.trim() || consultationDetails.length > 2000 ||
+      !['Christian', 'Muslim', 'Hindu', 'Other'].includes(religion) ||
       typeof welcomeMessage !== 'string' || welcomeMessage.length > 1000) {
       return response.status(400).json({ error: 'Provide doctor and clinic names, facilities, services, consultation details, working days, valid off-days, and a welcome message under 1000 characters.' });
     }
@@ -443,6 +452,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
           consultationDetails: consultationDetails.trim(),
           workingDays: normalizedWorkingDays,
           offDays: normalizedOffDays,
+          religion,
           setupComplete: true,
           welcomeMessage: welcomeMessage.trim(),
           updatedAt: new Date()
@@ -450,6 +460,13 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         { new: true, runValidators: true }
       ).lean();
       if (!updatedDoctor) return response.status(403).json({ error: 'Doctor account is inactive' });
+      if (typeof whatsappConnection.syncReligiousHolidays === 'function') {
+        try {
+          await whatsappConnection.syncReligiousHolidays(updatedDoctor.doctorId);
+        } catch (error) {
+          console.error(`Religious holiday calendar sync failed (${error?.name || 'Error'})`);
+        }
+      }
       response.json({
         doctorId: updatedDoctor.doctorId,
         doctorName: updatedDoctor.doctorName,
@@ -459,6 +476,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         consultationDetails: updatedDoctor.consultationDetails,
         workingDays: updatedDoctor.workingDays,
         offDays: updatedDoctor.offDays,
+        religion: updatedDoctor.religion,
         setupComplete: updatedDoctor.setupComplete,
         welcomeMessage: updatedDoctor.welcomeMessage,
         googleCalendarConnected: updatedDoctor.googleCalendarConnected,
