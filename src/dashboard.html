@@ -17,7 +17,7 @@
     .login-wrap { max-width: 440px; margin: 9vh auto; }
     .table td { vertical-align: top; }
     .symptoms { min-width: 220px; max-width: 460px; white-space: pre-wrap; overflow-wrap: anywhere; }
-    #notice[hidden], #dashboard[hidden], #login[hidden] { display: none !important; }
+    #notice[hidden], #dashboard[hidden], #login[hidden], #clinic-setup-panel[hidden], #clinic-experience[hidden] { display: none !important; }
   </style>
 </head>
 <body>
@@ -51,6 +51,37 @@
     </section>
 
     <section id="doctor-dashboard" hidden>
+      <section id="clinic-setup-panel" class="mb-5" aria-labelledby="setup-title" hidden>
+        <div class="clinic-mark fw-bold">CLINIC SETUP</div>
+        <h1 id="setup-title" class="h2">Configure your clinic</h1>
+        <form id="doctor-settings-form" class="row g-3">
+          <div class="col-sm-6"><label class="form-label" for="profile-doctor-name">Doctor name</label><input id="profile-doctor-name" class="form-control" required maxlength="120"></div>
+          <div class="col-sm-6"><label class="form-label" for="profile-clinic-name">Clinic name</label><input id="profile-clinic-name" class="form-control" required maxlength="160"></div>
+          <div class="col-md-6"><label class="form-label" for="profile-facilities">Facilities (one per line)</label><textarea id="profile-facilities" class="form-control" rows="4" required></textarea></div>
+          <div class="col-md-6"><label class="form-label" for="profile-services">Treatments and services (one per line)</label><textarea id="profile-services" class="form-control" rows="4" required></textarea></div>
+          <div class="col-12"><label class="form-label" for="profile-consultation-details">Consultation details</label><textarea id="profile-consultation-details" class="form-control" rows="3" maxlength="2000" required></textarea></div>
+          <fieldset class="col-12">
+            <legend class="form-label">Working days</legend>
+            <div class="d-flex flex-wrap gap-3">
+              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="0"> Sunday</label>
+              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="1"> Monday</label>
+              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="2"> Tuesday</label>
+              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="3"> Wednesday</label>
+              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="4"> Thursday</label>
+              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="5"> Friday</label>
+              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="6"> Saturday</label>
+            </div>
+          </fieldset>
+          <div class="col-md-6">
+            <label class="form-label" for="off-day-date">Clinic off-days</label>
+            <div class="d-flex gap-2"><input id="off-day-date" class="form-control" type="date"><button id="add-off-day" class="btn btn-outline-secondary" type="button">Add date</button></div>
+            <ul id="off-day-list" class="list-unstyled mt-2 mb-0" aria-live="polite"></ul>
+          </div>
+          <div class="col-md-6"><label class="form-label" for="profile-welcome">Welcome message</label><textarea id="profile-welcome" class="form-control" rows="3" maxlength="1000"></textarea></div>
+          <div class="col-12 d-flex gap-2"><button class="btn btn-primary" type="submit">Save clinic setup</button><button id="cancel-clinic-setup" class="btn btn-outline-secondary" type="button" hidden>Cancel</button></div>
+        </form>
+      </section>
+      <div id="clinic-experience" hidden>
       <div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-4">
         <div>
           <div class="clinic-mark fw-bold">DAILY SCHEDULE</div>
@@ -89,13 +120,7 @@
 
       <section class="mt-5" aria-labelledby="settings-title">
         <h2 id="settings-title" class="h3">Bot settings</h2>
-        <form id="doctor-settings-form" class="row g-3 mb-4">
-          <div class="col-sm-6"><label class="form-label" for="profile-doctor-name">Doctor name</label><input id="profile-doctor-name" class="form-control" required maxlength="120"></div>
-          <div class="col-sm-6"><label class="form-label" for="profile-clinic-name">Clinic name</label><input id="profile-clinic-name" class="form-control" required maxlength="160"></div>
-          <div class="col-sm-6"><label class="form-label" for="profile-facilities">Facilities (one per line)</label><textarea id="profile-facilities" class="form-control" rows="4" required></textarea></div>
-          <div class="col-sm-6"><label class="form-label" for="profile-welcome">Welcome message</label><textarea id="profile-welcome" class="form-control" rows="4" maxlength="1000"></textarea></div>
-          <div class="col-12"><button class="btn btn-primary" type="submit">Save bot settings</button></div>
-        </form>
+        <button id="edit-clinic-setup" class="btn btn-outline-primary" type="button">Edit clinic setup</button>
         <div class="border-top pt-3" aria-labelledby="whatsapp-title">
           <h3 id="whatsapp-title" class="h4">WhatsApp connection</h3>
           <p id="whatsapp-connection-status" class="text-secondary" aria-live="polite">Not connected</p>
@@ -106,6 +131,7 @@
           </div>
         </div>
       </section>
+      </div>
     </section>
 
     <section id="admin-dashboard" hidden>
@@ -152,11 +178,19 @@
     const emptyState = document.querySelector('#empty-state');
     const logoutButton = document.querySelector('#logout');
     const doctorRows = document.querySelector('#doctor-accounts');
+    const setupPanel = document.querySelector('#clinic-setup-panel');
+    const clinicExperience = document.querySelector('#clinic-experience');
+    const editClinicSetupButton = document.querySelector('#edit-clinic-setup');
+    const cancelClinicSetupButton = document.querySelector('#cancel-clinic-setup');
+    const offDayList = document.querySelector('#off-day-list');
     const whatsappStatus = document.querySelector('#whatsapp-connection-status');
     const whatsappButton = document.querySelector('#connect-whatsapp');
     const whatsappQrPanel = document.querySelector('#whatsapp-qr-panel');
     const whatsappQr = document.querySelector('#whatsapp-qr');
     let whatsappPollTimer;
+    let configuredOffDays = [];
+    let clinicSetupComplete = false;
+    let editingClinicSetup = false;
 
     function showError(message) {
       notice.textContent = message;
@@ -175,9 +209,12 @@
       document.querySelector('#brand').textContent = brand;
       document.title = `${brand} Dashboard`;
       if (session.role === 'DOCTOR') {
-        loadAppointments().catch((error) => showError(error.message));
-        loadDoctorSettings().catch((error) => showError(error.message));
-        loadWhatsAppStatus().catch((error) => showError(error.message));
+        loadDoctorSettings().then((settings) => {
+          if (settings.setupComplete) {
+            loadAppointments().catch((error) => showError(error.message));
+            loadWhatsAppStatus().catch((error) => showError(error.message));
+          }
+        }).catch((error) => showError(error.message));
       } else if (session.role === 'SUPERADMIN') {
         loadDoctors().catch((error) => showError(error.message));
       }
@@ -235,7 +272,20 @@
       document.querySelector('#profile-doctor-name').value = settings.doctorName;
       document.querySelector('#profile-clinic-name').value = settings.clinicName;
       document.querySelector('#profile-facilities').value = settings.facilitiesList.join('\n');
+      document.querySelector('#profile-services').value = (settings.servicesList || []).join('\n');
+      document.querySelector('#profile-consultation-details').value = settings.consultationDetails || '';
       document.querySelector('#profile-welcome').value = settings.welcomeMessage || '';
+      const workingDays = new Set(settings.workingDays || []);
+      document.querySelectorAll('.working-day').forEach((checkbox) => {
+        checkbox.checked = workingDays.has(Number(checkbox.value));
+      });
+      configuredOffDays = [...(settings.offDays || [])];
+      renderOffDays();
+      clinicSetupComplete = settings.setupComplete === true;
+      setupPanel.hidden = clinicSetupComplete && !editingClinicSetup;
+      clinicExperience.hidden = !clinicSetupComplete || editingClinicSetup;
+      editClinicSetupButton.hidden = !clinicSetupComplete || editingClinicSetup;
+      cancelClinicSetupButton.hidden = !editingClinicSetup;
       document.querySelector('#calendar-connection-status').textContent = settings.googleCalendarConnected
         ? `Connected to ${settings.googleCalendarId}`
         : 'Not connected';
@@ -246,6 +296,25 @@
       const oauthSetup = document.querySelector('#calendar-oauth-setup');
       connectCalendar.hidden = !settings.calendarOAuthAvailable;
       oauthSetup.hidden = settings.calendarOAuthAvailable;
+      return settings;
+    }
+
+    function renderOffDays() {
+      offDayList.replaceChildren();
+      for (const offDay of configuredOffDays) {
+        const item = document.createElement('li');
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'btn btn-sm btn-outline-secondary me-2';
+        removeButton.textContent = 'Remove';
+        removeButton.setAttribute('aria-label', `Remove off-day ${offDay}`);
+        removeButton.addEventListener('click', () => {
+          configuredOffDays = configuredOffDays.filter((date) => date !== offDay);
+          renderOffDays();
+        });
+        item.append(removeButton, document.createTextNode(offDay));
+        offDayList.append(item);
+      }
     }
 
     async function loadWhatsAppStatus() {
@@ -340,10 +409,20 @@
     });
     document.querySelector('#doctor-settings-form').addEventListener('submit', async (event) => {
       event.preventDefault();
+      const workingDays = [...document.querySelectorAll('.working-day:checked')]
+        .map((checkbox) => Number(checkbox.value));
+      if (!workingDays.length) {
+        showError('Select at least one working day.');
+        return;
+      }
       const payload = {
         doctorName: document.querySelector('#profile-doctor-name').value,
         clinicName: document.querySelector('#profile-clinic-name').value,
         facilitiesList: document.querySelector('#profile-facilities').value.split('\n').map((item) => item.trim()).filter(Boolean),
+        servicesList: document.querySelector('#profile-services').value.split('\n').map((item) => item.trim()).filter(Boolean),
+        consultationDetails: document.querySelector('#profile-consultation-details').value,
+        workingDays,
+        offDays: configuredOffDays,
         welcomeMessage: document.querySelector('#profile-welcome').value
       };
       try {
@@ -353,13 +432,40 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-        if (!response.ok) throw new Error('Could not save bot settings.');
-        await loadDoctorSettings();
+        if (!response.ok) {
+          const result = await response.json();
+          throw new Error(result.error || 'Could not save clinic setup.');
+        }
+        notice.hidden = true;
+        editingClinicSetup = false;
+        const settings = await loadDoctorSettings();
+        if (settings.setupComplete) {
+          await loadAppointments();
+          await startWhatsAppPairing();
+        }
       } catch (error) {
         showError(error.message);
       }
     });
-    whatsappButton.addEventListener('click', async () => {
+    document.querySelector('#add-off-day').addEventListener('click', () => {
+      const date = document.querySelector('#off-day-date').value;
+      if (!date || configuredOffDays.includes(date)) return;
+      configuredOffDays = [...configuredOffDays, date].sort();
+      document.querySelector('#off-day-date').value = '';
+      renderOffDays();
+    });
+    editClinicSetupButton.addEventListener('click', () => {
+      editingClinicSetup = true;
+      setupPanel.hidden = false;
+      clinicExperience.hidden = true;
+      editClinicSetupButton.hidden = true;
+      cancelClinicSetupButton.hidden = false;
+    });
+    cancelClinicSetupButton.addEventListener('click', async () => {
+      editingClinicSetup = false;
+      await loadDoctorSettings();
+    });
+    async function startWhatsAppPairing() {
       whatsappButton.disabled = true;
       whatsappStatus.textContent = 'Starting secure connection…';
       whatsappQrPanel.hidden = true;
@@ -374,7 +480,8 @@
         whatsappButton.disabled = false;
         showError(error.message);
       }
-    });
+    }
+    whatsappButton.addEventListener('click', startWhatsAppPairing);
     document.querySelector('#refresh').addEventListener('click', () => {
       loadAppointments().catch((error) => showError(error.message));
     });

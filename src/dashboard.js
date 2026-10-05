@@ -5,6 +5,7 @@ const { getLocalDateParts, getLocalDayBounds } = require('./dateParser');
 const { DashboardUser, Doctor, consumeDashboardLoginAttempt } = require('./models');
 const { hashPassword, verifyPassword } = require('./passwords');
 const { encryptJson, hasValidEncryptionKey } = require('./secretBox');
+const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
 
 const cookieName = 'doctorbot_dashboard';
 const sessionDurationSeconds = 8 * 60 * 60;
@@ -368,6 +369,11 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       clinicName: doctor.clinicName,
       email: doctor.email,
       facilitiesList: doctor.facilitiesList,
+      servicesList: doctor.servicesList || [],
+      consultationDetails: doctor.consultationDetails || '',
+      workingDays: doctor.workingDays || [1, 2, 3, 4, 5],
+      offDays: doctor.offDays || [],
+      setupComplete: doctor.setupComplete === true,
       welcomeMessage: doctor.welcomeMessage,
       googleCalendarConnected: doctor.googleCalendarConnected,
       calendarOAuthAvailable: isGoogleCalendarOAuthAvailable(),
@@ -379,6 +385,9 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     const user = response.locals.dashboardUser;
     if (user.role !== 'DOCTOR' || !user.doctorId) {
       return response.status(403).json({ error: 'Doctor access required' });
+    }
+    if (!response.locals.doctor?.setupComplete) {
+      return response.status(409).json({ error: 'Save your clinic setup before connecting WhatsApp' });
     }
     if (typeof whatsappConnection.startWhatsAppConnection !== 'function') {
       return response.status(503).json({ error: 'WhatsApp connection is unavailable' });
@@ -397,6 +406,9 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     if (user.role !== 'DOCTOR' || !user.doctorId) {
       return response.status(403).json({ error: 'Doctor access required' });
     }
+    if (!response.locals.doctor?.setupComplete) {
+      return response.status(409).json({ error: 'Save your clinic setup before connecting WhatsApp' });
+    }
     const state = whatsappConnection.getWhatsAppConnectionStatus?.(user.doctorId) || { status: 'disconnected' };
     response.json({ status: state.status, qrDataUrl: state.qrDataUrl || null });
   });
@@ -404,12 +416,20 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
   app.put('/api/dashboard/settings', requireDashboardAuth, async (request, response) => {
     const doctor = response.locals.doctor;
     if (!doctor) return response.status(403).json({ error: 'Doctor access required' });
-    const { doctorName, clinicName, facilitiesList, welcomeMessage } = request.body || {};
+    const {
+      doctorName, clinicName, facilitiesList, servicesList, consultationDetails,
+      workingDays, offDays, welcomeMessage
+    } = request.body || {};
     const normalizedFacilities = normalizeFacilitiesList(facilitiesList);
+    const normalizedServices = normalizeFacilitiesList(servicesList);
+    const normalizedWorkingDays = normalizeWorkingDays(workingDays);
+    const normalizedOffDays = normalizeOffDays(offDays);
     if (typeof doctorName !== 'string' || !doctorName.trim() || doctorName.length > 120 ||
       typeof clinicName !== 'string' || !clinicName.trim() || clinicName.length > 160 ||
-      !normalizedFacilities || typeof welcomeMessage !== 'string' || welcomeMessage.length > 1000) {
-      return response.status(400).json({ error: 'Provide a doctor name, clinic name, 1-20 facilities, and a welcome message under 1000 characters.' });
+      !normalizedFacilities || !normalizedServices || !normalizedWorkingDays || !normalizedOffDays ||
+      typeof consultationDetails !== 'string' || !consultationDetails.trim() || consultationDetails.length > 2000 ||
+      typeof welcomeMessage !== 'string' || welcomeMessage.length > 1000) {
+      return response.status(400).json({ error: 'Provide doctor and clinic names, facilities, services, consultation details, working days, valid off-days, and a welcome message under 1000 characters.' });
     }
 
     try {
@@ -419,6 +439,11 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
           doctorName: doctorName.trim(),
           clinicName: clinicName.trim(),
           facilitiesList: normalizedFacilities,
+          servicesList: normalizedServices,
+          consultationDetails: consultationDetails.trim(),
+          workingDays: normalizedWorkingDays,
+          offDays: normalizedOffDays,
+          setupComplete: true,
           welcomeMessage: welcomeMessage.trim(),
           updatedAt: new Date()
         } },
@@ -430,6 +455,11 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         doctorName: updatedDoctor.doctorName,
         clinicName: updatedDoctor.clinicName,
         facilitiesList: updatedDoctor.facilitiesList,
+        servicesList: updatedDoctor.servicesList,
+        consultationDetails: updatedDoctor.consultationDetails,
+        workingDays: updatedDoctor.workingDays,
+        offDays: updatedDoctor.offDays,
+        setupComplete: updatedDoctor.setupComplete,
         welcomeMessage: updatedDoctor.welcomeMessage,
         googleCalendarConnected: updatedDoctor.googleCalendarConnected,
         calendarOAuthAvailable: isGoogleCalendarOAuthAvailable(),

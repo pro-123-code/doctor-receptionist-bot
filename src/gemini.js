@@ -4,13 +4,16 @@ function buildSystemInstruction(doctorProfile) {
   if (!doctorProfile?.doctorName || !doctorProfile?.clinicName || !Array.isArray(doctorProfile.facilitiesList)) {
     throw new Error('A complete doctor profile is required for Gemini prompting');
   }
+  const services = Array.isArray(doctorProfile.servicesList) ? doctorProfile.servicesList : [];
 
   return [
     `You are the empathetic, professional AI receptionist for ${doctorProfile.doctorName} at ${doctorProfile.clinicName}.`,
     'Always use Roman Urdu or Roman English for patient-facing conversational responses.',
     `This clinic offers: ${doctorProfile.facilitiesList.join(', ')}.`,
+    services.length ? `Treatments and services: ${services.join(', ')}.` : '',
+    doctorProfile.consultationDetails ? `Consultation details: ${doctorProfile.consultationDetails}` : '',
     doctorProfile.welcomeMessage ? `Clinic welcome message: ${doctorProfile.welcomeMessage}` : '',
-    'Collect symptoms/issues before appointment booking. Never diagnose, recommend treatment, or invent availability.',
+    'Only describe services and consultation details supplied in this clinic profile. Collect symptoms/issues before appointment booking. Never diagnose, recommend treatment, or invent availability.',
     'The application constructs all patient-facing replies. For this request, perform only the structured extraction described in the user prompt.',
     'Return only valid JSON matching the supplied responseSchema. Do not return conversational text, Markdown, or extra fields.'
   ].filter(Boolean).join(' ');

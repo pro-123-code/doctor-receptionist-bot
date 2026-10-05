@@ -6,6 +6,7 @@ const { google } = require('googleapis');
 const cron = require('node-cron');
 const nodemailer = require('nodemailer');
 const { getLocalDayBounds, parseRequestedDate } = require('../src/dateParser');
+const { isClinicOpenOnDate, normalizeOffDays, normalizeWorkingDays } = require('../src/clinicSchedule');
 const { createGoogleOAuthState, createSessionToken, mountDashboard, verifyGoogleOAuthState, verifySessionToken } = require('../src/dashboard');
 const { generateAppointmentsWorkbook } = require('../src/excelGenerator');
 const { getCalendarErrorDetails } = require('../src/calendarErrors');
@@ -39,6 +40,9 @@ test('doctor profile defaults satisfy required name fields', async () => {
   await assert.doesNotReject(doctor.validate());
   assert.equal(doctor.doctorName, 'Doctor');
   assert.equal(doctor.clinicName, 'Clinic');
+  assert.deepEqual(doctor.workingDays, [1, 2, 3, 4, 5]);
+  assert.deepEqual(doctor.offDays, []);
+  assert.equal(doctor.setupComplete, false);
 });
 
 test('natural dates use the clinic-local calendar date', () => {
@@ -61,17 +65,34 @@ test('clinic day boundaries account for daylight-saving changes', () => {
   assert.equal((bounds.end - bounds.start) / 3_600_000, 23);
 });
 
+test('doctor schedules honor configured workdays and date-specific off-days', () => {
+  const schedule = {
+    workingDays: normalizeWorkingDays([0, 1, 2, 3, 4, 5, 6]),
+    offDays: normalizeOffDays(['2026-10-06'])
+  };
+  assert.equal(isClinicOpenOnDate({ year: 2026, month: 10, day: 6 }, schedule), false);
+  assert.equal(isClinicOpenOnDate({ year: 2026, month: 10, day: 10 }, schedule), true);
+  assert.deepEqual(normalizeWorkingDays([6, 1, 6]), [1, 6]);
+  assert.equal(normalizeWorkingDays([]), null);
+  assert.deepEqual(normalizeOffDays(['2026-12-25', '2026-12-25']), ['2026-12-25']);
+  assert.equal(normalizeOffDays(['2026-02-30']), null);
+});
+
 test('Gemini extraction instructions require schema-only output', () => {
   const instruction = buildSystemInstruction({
     doctorName: 'Dr. Example',
     clinicName: 'Example Clinic',
     facilitiesList: ['OPD', 'Imaging'],
+    servicesList: ['Vaccination', 'Wound care'],
+    consultationDetails: 'Consultation by appointment only.',
     welcomeMessage: 'Welcome to Example Clinic'
   });
   assert.match(instruction, /Return only valid JSON matching the supplied responseSchema/);
   assert.match(instruction, /application constructs all patient-facing replies/);
   assert.match(instruction, /Dr\. Example/);
   assert.match(instruction, /OPD, Imaging/);
+  assert.match(instruction, /Vaccination, Wound care/);
+  assert.match(instruction, /Consultation by appointment only/);
   assert.doesNotMatch(instruction, /Dr\. Ahmad|City Care Clinic/);
 });
 
@@ -400,7 +421,7 @@ test('WhatsApp dashboard routes are doctor-scoped and return browser QR state', 
   const user = { _id: 'whatsapp-user', role: 'DOCTOR', doctorId: 'clinic-whatsapp', isActive: true };
   let startedDoctorId;
   DashboardUser.findById = () => ({ lean: async () => user });
-  Doctor.findOne = () => ({ lean: async () => ({ doctorId: user.doctorId, isActive: true }) });
+  Doctor.findOne = () => ({ lean: async () => ({ doctorId: user.doctorId, isActive: true, setupComplete: true }) });
 
   try {
     const routes = new Map();
@@ -445,6 +466,108 @@ test('WhatsApp dashboard routes are doctor-scoped and return browser QR state', 
   }
 });
 
+test('clinic setup saves tenant schedule and gates WhatsApp pairing', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'setup-dashboard-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalMethods = {
+    dashboardFindById: DashboardUser.findById,
+    doctorFindOne: Doctor.findOne,
+    doctorFindOneAndUpdate: Doctor.findOneAndUpdate
+  };
+  const user = { _id: 'setup-user', role: 'DOCTOR', doctorId: 'setup-tenant', isActive: true };
+  let doctor = {
+    doctorId: user.doctorId,
+    isActive: true,
+    setupComplete: false,
+    facilitiesList: [],
+    servicesList: [],
+    workingDays: [1, 2, 3, 4, 5],
+    offDays: []
+  };
+  let savedFilter;
+  let savedUpdate;
+  let pairingStarted = false;
+  DashboardUser.findById = () => ({ lean: async () => user });
+  Doctor.findOne = () => ({ lean: async () => doctor });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    savedFilter = filter;
+    savedUpdate = update;
+    doctor = { ...doctor, ...update.$set };
+    return { lean: async () => doctor };
+  };
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', user.doctorId, {
+      async startWhatsAppConnection(doctorId) {
+        assert.equal(doctorId, user.doctorId);
+        pairingStarted = true;
+        return { status: 'starting' };
+      },
+      getWhatsAppConnectionStatus: () => ({ status: 'disconnected' })
+    });
+    const token = createSessionToken(user, secret, Date.now() + 60_000);
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` },
+      body: {
+        doctorName: 'Dr. Test',
+        clinicName: 'Tenant Clinic',
+        facilitiesList: ['OPD', 'Imaging'],
+        servicesList: ['Vaccination'],
+        consultationDetails: 'Appointments required.',
+        workingDays: [6, 1, 6],
+        offDays: ['2026-12-25'],
+        welcomeMessage: 'Welcome.'
+      }
+    };
+    const makeResponse = () => ({
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    });
+
+    const [connectAuth, connectHandler] = routes.get('POST /api/dashboard/whatsapp/connect');
+    let response = makeResponse();
+    await connectAuth(request, response, () => {});
+    await connectHandler(request, response);
+    assert.equal(response.statusCode, 409);
+    assert.equal(pairingStarted, false);
+
+    const [settingsAuth, settingsHandler] = routes.get('PUT /api/dashboard/settings');
+    response = makeResponse();
+    await settingsAuth(request, response, () => {});
+    await settingsHandler(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(savedFilter.doctorId, user.doctorId);
+    assert.equal(savedUpdate.$set.setupComplete, true);
+    assert.deepEqual(savedUpdate.$set.workingDays, [1, 6]);
+    assert.deepEqual(savedUpdate.$set.offDays, ['2026-12-25']);
+    assert.deepEqual(savedUpdate.$set.servicesList, ['Vaccination']);
+
+    response = makeResponse();
+    await connectAuth(request, response, () => {});
+    await connectHandler(request, response);
+    assert.equal(response.statusCode, 202);
+    assert.equal(pairingStarted, true);
+  } finally {
+    DashboardUser.findById = originalMethods.dashboardFindById;
+    Doctor.findOne = originalMethods.doctorFindOne;
+    Doctor.findOneAndUpdate = originalMethods.doctorFindOneAndUpdate;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
 test('Excel report contains the requested patient columns and data', async () => {
   const workbookBuffer = await generateAppointmentsWorkbook([{
     details: {
@@ -472,12 +595,16 @@ test('first-message greetings are deterministic and include ordered facilities',
     doctorName: 'Dr. Example',
     clinicName: 'Example Clinic',
     welcomeMessage: 'Welcome to Example Clinic',
-    facilitiesList: ['Outpatient', 'Imaging']
+    facilitiesList: ['Outpatient', 'Imaging'],
+    servicesList: ['Vaccination'],
+    consultationDetails: 'By appointment only.'
   };
   assert.match(getWelcomeMessage('Hi', doctor), /^Hello!/);
   assert.match(getWelcomeMessage('Salam', doctor), /^Walaikum Assalam!/);
   assert.match(getWelcomeMessage('I need an appointment', doctor), /^Ji farmaiye!/);
   assert.match(getWelcomeMessage('Hi', doctor), /1\. Outpatient[\s\S]*2\. Imaging/);
+  assert.match(getWelcomeMessage('Hi', doctor), /Vaccination/);
+  assert.match(getWelcomeMessage('Hi', doctor), /By appointment only/);
   assert.doesNotMatch(getWelcomeMessage('Hi', doctor), /Dr\. Ahmad|City Care Clinic|General OPD/);
 });
 

@@ -17,6 +17,7 @@ const { startDailyReport } = require('./cronJobs');
 const { getCalendarErrorDetails } = require('./calendarErrors');
 const { getWelcomeMessage } = require('./greetings');
 const { decryptJson } = require('./secretBox');
+const { isClinicOpenOnDate } = require('./clinicSchedule');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -164,7 +165,7 @@ function isGreeting(message) {
 }
 
 function isFacilityQuestion(message) {
-  return /\b(facilit(?:y|ies)|services?|what tests|which tests|do you (?:have|offer)|available at (?:the )?clinic)\b/i.test(message);
+  return /\b(facilit(?:y|ies)|services?|treatments?|consultations?|what tests|which tests|do you (?:have|offer)|available at (?:the )?clinic)\b/i.test(message);
 }
 
 function getZonedParts(date) {
@@ -202,7 +203,7 @@ function addLocalDays(parts, days) {
   return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
 }
 
-function buildCandidateSlots(timeMin, timeMax) {
+function buildCandidateSlots(timeMin, timeMax, doctorProfile) {
   const slots = [];
   const rangeStart = new Date(timeMin);
   const rangeEnd = new Date(timeMax);
@@ -215,7 +216,7 @@ function buildCandidateSlots(timeMin, timeMax) {
     const weekdayName = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(noon);
     const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekdayName);
 
-    if (weekday > 0 && weekday < 6) {
+    if (isClinicOpenOnDate(date, doctorProfile)) {
       for (
         let minutes = officeStartHour * 60;
         minutes + appointmentDurationMinutes <= officeEndHour * 60;
@@ -305,10 +306,19 @@ async function getBusyPeriods(timeMin, timeMax, doctorProfile) {
 }
 
 async function findAvailableSlots(requestedDate, doctorProfile) {
+  if (requestedDate) {
+    const dateParts = typeof requestedDate === 'string'
+      ? requestedDate.split('-').map(Number).reduce((parts, value, index) => {
+        parts[['year', 'month', 'day'][index]] = value;
+        return parts;
+      }, {})
+      : requestedDate;
+    if (!isClinicOpenOnDate(dateParts, doctorProfile)) return [];
+  }
   const { timeMin, timeMax } = getTimeRange(requestedDate);
   const { busyPeriods } = await getBusyPeriods(timeMin, timeMax, doctorProfile);
 
-  return buildCandidateSlots(timeMin, timeMax).filter(
+  return buildCandidateSlots(timeMin, timeMax, doctorProfile).filter(
     (slot) => !busyPeriods.some((busyPeriod) => overlaps(slot, busyPeriod))
   ).slice(0, 8);
 }
@@ -375,7 +385,15 @@ async function bookAppointment(conversation, slot, doctorProfile) {
   let calendarEvent;
   let calendarInsertStarted = false;
   try {
+    doctorProfile = await Doctor.findOne({ doctorId, isActive: true })
+      .select('+googleCredentialsEncrypted').lean();
+    if (!doctorProfile || !doctorProfile.setupComplete) return false;
     if (slot.start <= new Date()) return false;
+    if (!isClinicOpenOnDate(getLocalDateParts(slot.start, timeZone), doctorProfile)) {
+      const error = new Error('Clinic is closed on selected date');
+      error.code = 'CLINIC_CLOSED';
+      throw error;
+    }
 
     const existingReservation = await Appointment.findOne({ doctorId, slotKey: lockKey });
     if (existingReservation?.status === 'pending' && existingReservation.expiresAt <= new Date()) {
@@ -409,6 +427,18 @@ async function bookAppointment(conversation, slot, doctorProfile) {
     if (busyPeriods.some((busyPeriod) => overlaps(slot, busyPeriod))) {
       await Appointment.deleteOne({ _id: reservation._id, doctorId });
       return false;
+    }
+    const currentDoctor = await Doctor.findOne({ doctorId, isActive: true })
+      .select('workingDays offDays setupComplete').lean();
+    if (!currentDoctor || !currentDoctor.setupComplete) {
+      await Appointment.deleteOne({ _id: reservation._id, doctorId });
+      return false;
+    }
+    if (!isClinicOpenOnDate(getLocalDateParts(slot.start, timeZone), currentDoctor)) {
+      await Appointment.deleteOne({ _id: reservation._id, doctorId });
+      const error = new Error('Clinic is closed on selected date');
+      error.code = 'CLINIC_CLOSED';
+      throw error;
     }
     if (!await Doctor.exists({ doctorId, isActive: true })) {
       await Appointment.deleteOne({ _id: reservation._id, doctorId });
@@ -483,6 +513,14 @@ function validatePatientInput(step, value) {
   return value.length <= maxSymptomsLength;
 }
 
+function getClinicClosedReply(dateParts, doctorProfile) {
+  const localDate = new Date(Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day, 12));
+  const formattedDate = new Intl.DateTimeFormat('en-PK', {
+    weekday: 'long', month: 'long', day: 'numeric', timeZone
+  }).format(localDate);
+  return `Maazrat, ${doctorProfile.clinicName} ${formattedDate} ko band hai. Meherbani karke kisi aur working day ki tareekh batayein.`;
+}
+
 async function saveCalendarRetry(sender, conversation, doctorId) {
   conversation.step = 'calendarSelection';
   conversation.slots = [];
@@ -525,7 +563,14 @@ async function handleConversationMessage(sender, message, doctorProfile) {
 
   if (isGreeting(normalizedMessage)) return welcomeMessage();
   if (isFacilityQuestion(normalizedMessage)) {
-    return `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein ${doctorProfile.facilitiesList.join(', ')} ki sahuliyaat mojood hain.`;
+    const facilities = doctorProfile.facilitiesList.join(', ');
+    const services = doctorProfile.servicesList?.length
+      ? ` Hamari services aur treatments: ${doctorProfile.servicesList.join(', ')}.`
+      : '';
+    const consultation = doctorProfile.consultationDetails?.trim()
+      ? ` ${doctorProfile.consultationDetails.trim()}`
+      : '';
+    return `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein ${facilities} ki sahuliyaat mojood hain.${services}${consultation}`;
   }
 
   if (conversation.step === 'calendarSelection') {
@@ -577,6 +622,13 @@ async function handleConversationMessage(sender, message, doctorProfile) {
         end: new Date(selectedSlot.end)
       }, doctorProfile);
     } catch (error) {
+      if (error.code === 'CLINIC_CLOSED') {
+        conversation.step = 'appointmentDate';
+        conversation.requestedDate = undefined;
+        conversation.slots = [];
+        await saveConversation(sender, conversation, targetDoctorId);
+        return getClinicClosedReply(getLocalDateParts(selectedSlot.start, timeZone), doctorProfile);
+      }
       logServiceError('Calendar booking', error, Object.values(conversation.details), targetDoctorId);
       await saveCalendarRetry(sender, conversation, targetDoctorId);
       return 'Maazrat, appointment save karne mein mushkil aa gayi. Meherbani karke thori dair baad dobara reply karein.';
@@ -612,6 +664,10 @@ async function handleConversationMessage(sender, message, doctorProfile) {
     const requestedDate = parseRequestedDate(normalizedMessage, timeZone, appointmentLookaheadDays);
     if (!requestedDate) {
       return `Maazrat, tareekh samajh nahi aayi. Aaj se agle ${appointmentLookaheadDays} din ke andar koi tareekh batayein, misal: kal ya next Friday.`;
+    }
+
+    if (!isClinicOpenOnDate(requestedDate, doctorProfile)) {
+      return getClinicClosedReply(requestedDate, doctorProfile);
     }
 
     conversation.requestedDate = `${requestedDate.year}-${String(requestedDate.month).padStart(2, '0')}-${String(requestedDate.day).padStart(2, '0')}`;
