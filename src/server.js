@@ -1165,28 +1165,107 @@ function startDoctorWorkerSynchronization() {
   interval.unref();
 }
 
-async function startServer() {
-    try {
-        await connectDatabase(process.env.MONGODB_URI, clinicId, doctorId);
+function writeStartupLog(line) {
+  process.stdout.write(`${new Date().toISOString()} ${line}\n`);
+}
 
-        if (process.env.OPENAI_ALLOW_PHI_PROCESSING !== 'true' || !process.env.OPENAI_API_KEY) {
-            console.warn('WhatsApp voice notes are disabled: set OPENAI_API_KEY and OPENAI_ALLOW_PHI_PROCESSING=true to enable Urdu/English voice message transcription.');
-        }
-
-        const sessionInfo = getBaileysSessionInfo();
-        if (!sessionInfo.persistent) {
-            console.warn(`WhatsApp sessions at ${sessionInfo.authDirectory} are on an ephemeral filesystem and will be lost on every deploy. Set BAILEYS_AUTH_DIR to a mounted persistent disk.`);
-        } else {
-            console.log(`WhatsApp sessions persist at ${sessionInfo.authDirectory}`);
-        }
-
-        app.listen(port, () => {
-            console.log(`Doctor receptionist health server listening on port ${port}`);
-            startDoctorWorkerSynchronization();
-        });
-    } catch (error) {
-        logServiceError('Server startup', error);
+// Render captures stdout/stderr through pipes, so a hard exit can swallow the
+// buffered tail. Flush synchronously-ish before leaving to keep diagnostics.
+function flushAndExit(code) {
+  process.exitCode = code;
+  return new Promise((resolve) => {
+    const streams = [process.stdout, process.stderr];
+    let pending = 0;
+    const done = () => { if (--pending <= 0) resolve(); };
+    for (const stream of streams) {
+      if (stream.writableLength > 0) {
+        pending += 1;
+        stream.write('', done);
+      }
     }
+    if (pending === 0) resolve();
+    setTimeout(resolve, 1500).unref();
+  });
+}
+
+process.on('unhandledRejection', (reason) => {
+  writeStartupLog(`FATAL unhandledRejection: ${describeStartupError(reason)}`);
+  flushAndExit(1).then(() => process.exit(1));
+});
+process.on('uncaughtException', (error) => {
+  writeStartupLog(`FATAL uncaughtException: ${describeStartupError(error)}`);
+  flushAndExit(1).then(() => process.exit(1));
+});
+
+function describeStartupError(error) {
+  if (!error) return 'unknown error';
+  if (typeof error === 'string') return error;
+  const parts = [error.name || 'Error', error.message];
+  const cause = error.cause;
+  if (cause) parts.push(`caused by ${cause.name || 'Error'}: ${cause.message}`);
+  if (error.code) parts.push(`code=${error.code}`);
+  const detail = parts.filter(Boolean).join(': ');
+  return `${detail}\n${(error.stack || '').split('\n').slice(1, 6).join('\n')}`;
+}
+
+function reportConfiguration() {
+  const missing = ['MONGODB_URI', 'DASHBOARD_SESSION_SECRET', 'DOCTOR_CONFIG_ENCRYPTION_KEY']
+    .filter((name) => !process.env[name]);
+  writeStartupLog(
+    `Config: doctorId=${doctorId} node=${process.version} ` +
+    `mongo=${process.env.MONGODB_URI ? 'set' : 'MISSING'} ` +
+    `sessionSecret=${process.env.DASHBOARD_SESSION_SECRET ? 'set' : 'MISSING'} ` +
+    `encryptionKey=${process.env.DOCTOR_CONFIG_ENCRYPTION_KEY ? 'set' : 'MISSING'} ` +
+    `gemini=${process.env.GEMINI_API_KEY ? 'set' : 'unset'} ` +
+    `openai=${process.env.OPENAI_API_KEY ? 'set' : 'unset'} ` +
+    `trustProxy=${process.env.TRUST_PROXY || 'unset'} ` +
+    (missing.length ? `MISSING_VARS=${missing.join(',')}` : 'all core vars present')
+  );
+}
+
+async function startServer() {
+  reportConfiguration();
+
+  try {
+    writeStartupLog('Connecting to MongoDB...');
+    await connectDatabase(process.env.MONGODB_URI, clinicId, doctorId);
+    writeStartupLog('MongoDB connected.');
+  } catch (error) {
+    writeStartupLog(`FATAL database connection failed: ${describeStartupError(error)}`);
+    await flushAndExit(1);
+    process.exit(1);
+    return;
+  }
+
+  if (process.env.OPENAI_ALLOW_PHI_PROCESSING !== 'true' || !process.env.OPENAI_API_KEY) {
+    writeStartupLog('WhatsApp voice notes are disabled: set OPENAI_API_KEY and OPENAI_ALLOW_PHI_PROCESSING=true to enable Urdu/English voice message transcription.');
+  }
+
+  const sessionInfo = getBaileysSessionInfo();
+  if (!sessionInfo.persistent) {
+    writeStartupLog(`WhatsApp sessions at ${sessionInfo.authDirectory} are on an ephemeral filesystem and will be lost on every deploy. Set BAILEYS_AUTH_DIR to a mounted persistent disk.`);
+  } else {
+    writeStartupLog(`WhatsApp sessions persist at ${sessionInfo.authDirectory}`);
+  }
+
+  try {
+    await new Promise((resolve, reject) => {
+      const server = app.listen(port, () => {
+        writeStartupLog(`Doctor receptionist server listening on port ${port}`);
+        resolve(server);
+      });
+      server.once('error', reject);
+    });
+  } catch (error) {
+    writeStartupLog(`FATAL HTTP listener failed: ${describeStartupError(error)}`);
+    await flushAndExit(1);
+    process.exit(1);
+    return;
+  }
+
+  writeStartupLog('Starting doctor worker synchronization.');
+  startDoctorWorkerSynchronization();
+  writeStartupLog('Startup complete.');
 }
 
 // Function ko call karna zaroori hai taake server start ho
