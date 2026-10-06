@@ -67,6 +67,36 @@
           </div>
           <div class="col-12"><label class="form-label" for="profile-consultation-details">Consultation details</label><textarea id="profile-consultation-details" class="form-control" rows="3" maxlength="2000" required></textarea></div>
           <fieldset class="col-12">
+            <legend class="form-label">Clinic timings</legend>
+            <p class="form-hint mb-2">Only appointment times inside these hours are ever offered to patients. These settings belong to your clinic only.</p>
+            <div class="row g-3">
+              <div class="col-sm-6 col-lg-3">
+                <label class="form-label" for="office-start-hour">Opens at</label>
+                <select id="office-start-hour" class="form-select"></select>
+              </div>
+              <div class="col-sm-6 col-lg-3">
+                <label class="form-label" for="office-end-hour">Closes at</label>
+                <select id="office-end-hour" class="form-select"></select>
+              </div>
+              <div class="col-sm-6 col-lg-3">
+                <label class="form-label" for="appointment-duration">Slot length</label>
+                <select id="appointment-duration" class="form-select">
+                  <option value="15">15 minutes</option>
+                  <option value="20">20 minutes</option>
+                  <option value="30">30 minutes</option>
+                  <option value="45">45 minutes</option>
+                  <option value="60">60 minutes</option>
+                </select>
+              </div>
+              <div class="col-sm-6 col-lg-3">
+                <label class="form-label" for="appointment-lookahead">Book up to (days)</label>
+                <input id="appointment-lookahead" class="form-control" type="number" min="1" max="30" step="1" required>
+              </div>
+            </div>
+            <p id="timing-summary" class="form-hint mb-0 mt-2"></p>
+            <p id="timing-error" class="text-danger mb-0 mt-1" hidden></p>
+          </fieldset>
+          <fieldset class="col-12">
             <legend class="form-label">Working days</legend>
             <div class="d-flex flex-wrap gap-3">
               <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="0"> Sunday</label>
@@ -350,6 +380,7 @@
       document.querySelectorAll('.working-day').forEach((checkbox) => {
         checkbox.checked = workingDays.has(Number(checkbox.value));
       });
+      populateClinicTiming(settings);
       configuredOffDays = [...(settings.offDays || [])];
       renderOffDays();
       configuredHolidayOpenDays = [...(settings.religiousHolidayOpenDays || [])];
@@ -472,6 +503,66 @@
         adminSection.hidden = false;
         showError(error.message);
       }
+    }
+
+    function hourLabel(hour) {
+      const suffix = hour === 0 || hour === 24 ? '' : (hour < 12 ? 'AM' : 'PM');
+      const display = hour % 12 === 0 ? 12 : hour % 12;
+      return suffix ? `${display}:00 ${suffix}` : (hour === 0 ? '12:00 AM' : '12:00 PM');
+    }
+
+    function populateClinicTiming(settings) {
+      const startSelect = document.querySelector('#office-start-hour');
+      const endSelect = document.querySelector('#office-end-hour');
+      const durationSelect = document.querySelector('#appointment-duration');
+      const lookaheadInput = document.querySelector('#appointment-lookahead');
+      if (!startSelect.options.length) {
+        for (let hour = 0; hour <= 23; hour += 1) {
+          startSelect.append(new Option(hourLabel(hour), String(hour)));
+        }
+        for (let hour = 1; hour <= 24; hour += 1) {
+          endSelect.append(new Option(hourLabel(hour === 24 ? 24 : hour), String(hour)));
+        }
+      }
+      const start = Number(settings.officeStartHour ?? 9);
+      const end = Number(settings.officeEndHour ?? 17);
+      startSelect.value = String(Math.min(23, Math.max(0, start)));
+      endSelect.value = String(Math.min(24, Math.max(1, end)));
+      durationSelect.value = String([15, 20, 30, 45, 60].includes(Number(settings.appointmentDurationMinutes))
+        ? Number(settings.appointmentDurationMinutes)
+        : 30);
+      lookaheadInput.value = String(Math.min(30, Math.max(1, Number(settings.appointmentLookaheadDays) || 7)));
+      renderTimingSummary();
+    }
+
+    function readClinicTiming() {
+      const officeStartHour = Number(document.querySelector('#office-start-hour').value);
+      const officeEndHour = Number(document.querySelector('#office-end-hour').value);
+      const appointmentDurationMinutes = Number(document.querySelector('#appointment-duration').value);
+      const appointmentLookaheadDays = Number(document.querySelector('#appointment-lookahead').value);
+      const error = document.querySelector('#timing-error');
+      const valid = officeStartHour >= 0 && officeEndHour <= 24 && officeEndHour > officeStartHour &&
+        Number.isInteger(appointmentLookaheadDays) && appointmentLookaheadDays >= 1 && appointmentLookaheadDays <= 30;
+      error.hidden = valid;
+      error.textContent = valid ? '' : 'Closing time must be later than opening time, and bookings must be 1 to 30 days ahead.';
+      renderTimingSummary();
+      return valid ? { officeStartHour, officeEndHour, appointmentDurationMinutes, appointmentLookaheadDays } : null;
+    }
+
+    function renderTimingSummary() {
+      const summary = document.querySelector('#timing-summary');
+      if (!summary) return;
+      const start = Number(document.querySelector('#office-start-hour').value);
+      const end = Number(document.querySelector('#office-end-hour').value);
+      const duration = Number(document.querySelector('#appointment-duration').value);
+      const lookahead = Number(document.querySelector('#appointment-lookahead').value);
+      if (!(end > start)) {
+        summary.textContent = 'Choose a closing time later than the opening time.';
+        return;
+      }
+      const total = Math.floor((end * 60 - start * 60) / duration);
+      summary.textContent = `Patients can book ${total} slot${total === 1 ? '' : 's'} per open day `
+        + `(${hourLabel(start)} to ${hourLabel(end)}), up to ${lookahead} day${lookahead === 1 ? '' : 's'} ahead.`;
     }
 
     function renderOffDays() {
@@ -692,10 +783,16 @@
         showError('Select at least one working day.');
         return;
       }
+      const timing = readClinicTiming();
+      if (!timing) {
+        showError('Fix the clinic timings before saving.');
+        return;
+      }
       const payload = {
         doctorName: document.querySelector('#profile-doctor-name').value,
         clinicName: document.querySelector('#profile-clinic-name').value,
         religion: document.querySelector('#profile-religion').value,
+        ...timing,
         basicCheckupFee: Number(document.querySelector('#basic-checkup-fee').value),
         facilityPricing: [...facilityPricingList.querySelectorAll('.pricing-row')].map((row) => ({
           category: row.querySelector('[data-pricing-category]').value,

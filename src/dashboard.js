@@ -8,6 +8,7 @@ const { encryptJson, hasValidEncryptionKey } = require('./secretBox');
 const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
 const { getReligiousHolidays } = require('./clinicSchedule');
 const { isValidRupeeAmount, normalizeFacilityPricing } = require('./facilityPricing');
+const { normalizeClinicTimingInput, resolveClinicTiming } = require('./clinicTiming');
 const { verifyDoctorCalendarAccess } = require('./calendarAccess');
 
 const cookieName = 'doctorbot_dashboard';
@@ -227,6 +228,7 @@ function normalizeDoctorSettings(body = {}) {
     doctorName, clinicName, consultationDetails, workingDays, offDays, religion,
     basicCheckupFee, facilityPricing, welcomeMessage
   } = body;
+  const timingPatch = normalizeClinicTimingInput(body);
   const normalizedWorkingDays = normalizeWorkingDays(workingDays);
   const normalizedOffDays = normalizeOffDays(offDays);
   const religiousHolidayOpenDays = normalizeOffDays(body.religiousHolidayOpenDays || []);
@@ -245,6 +247,7 @@ function normalizeDoctorSettings(body = {}) {
     typeof clinicName !== 'string' || !clinicName.trim() || clinicName.length > 160 ||
     !normalizedPricing || !normalizedPricing.length ||
     !normalizedWorkingDays || !normalizedOffDays || !religiousHolidayOpenDays || hasInvalidHolidayOverride ||
+    !timingPatch ||
     !isValidRupeeAmount(basicCheckupFee) ||
     typeof consultationDetails !== 'string' || !consultationDetails.trim() || consultationDetails.length > 2000 ||
     !['Christian', 'Muslim', 'Hindu', 'Other'].includes(religion) ||
@@ -263,6 +266,7 @@ function normalizeDoctorSettings(body = {}) {
     religiousHolidayOpenDays,
     religion,
     welcomeMessage: welcomeMessage.trim(),
+    ...timingPatch,
     setupComplete: true,
     updatedAt: new Date()
   };
@@ -306,6 +310,17 @@ function normalizeAdminDoctorPatch(body = {}, existingDoctor = {}) {
     const normalizedWorkingDays = normalizeWorkingDays(body.workingDays);
     if (!normalizedWorkingDays) return null;
     patch.workingDays = normalizedWorkingDays;
+  }
+  if (body.officeStartHour !== undefined || body.officeEndHour !== undefined ||
+    body.appointmentDurationMinutes !== undefined || body.appointmentLookaheadDays !== undefined) {
+    const timingPatch = normalizeClinicTimingInput({
+      officeStartHour: body.officeStartHour,
+      officeEndHour: body.officeEndHour,
+      appointmentDurationMinutes: body.appointmentDurationMinutes,
+      appointmentLookaheadDays: body.appointmentLookaheadDays
+    });
+    if (!timingPatch) return null;
+    Object.assign(patch, timingPatch);
   }
   if (body.offDays !== undefined) {
     const normalizedOffDays = normalizeOffDays(body.offDays);
@@ -625,6 +640,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       workingDays: doctor.workingDays || [1, 2, 3, 4, 5],
       offDays: doctor.offDays || [],
       religiousHolidayOpenDays: doctor.religiousHolidayOpenDays || [],
+      ...resolveClinicTiming(doctor),
       religiousHolidays: [...new Set([currentDate.year, currentDate.year + 1])]
         .flatMap((year) => getReligiousHolidays(previewReligion, year))
         .filter(({ date }) => date >= currentDateKey),
@@ -805,6 +821,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         consultationDetails: updatedDoctor.consultationDetails,
         workingDays: updatedDoctor.workingDays,
         offDays: updatedDoctor.offDays,
+        ...resolveClinicTiming(updatedDoctor),
         religion: updatedDoctor.religion,
         setupComplete: updatedDoctor.setupComplete,
         welcomeMessage: updatedDoctor.welcomeMessage,
@@ -876,6 +893,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         workingDays: doctor.workingDays || [1, 2, 3, 4, 5],
         offDays: doctor.offDays || [],
         religiousHolidayOpenDays: doctor.religiousHolidayOpenDays || [],
+        ...resolveClinicTiming(doctor),
         religiousHolidays: [...new Set([currentDate.year, currentDate.year + 1])]
           .flatMap((year) => getReligiousHolidays(previewReligion, year))
           .filter(({ date }) => date >= currentDateKey),
@@ -941,6 +959,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         workingDays: updatedDoctor.workingDays,
         offDays: updatedDoctor.offDays,
         religiousHolidayOpenDays: updatedDoctor.religiousHolidayOpenDays || [],
+        ...resolveClinicTiming(updatedDoctor),
         religion: updatedDoctor.religion,
         setupComplete: updatedDoctor.setupComplete,
         welcomeMessage: updatedDoctor.welcomeMessage

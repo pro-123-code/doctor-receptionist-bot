@@ -24,6 +24,7 @@ const { resolveGoogleCredentials, verifyDoctorCalendarAccess } = require('../src
 const { startDailyReport } = require('../src/cronJobs');
 const { privacyPolicy, termsOfService } = require('../src/legalPages');
 const { buildOfferOrder, formatSlotOffer, getSlotLocalDateKey, getZonedDateParts, isMoreSlotRequest, paginateSlots } = require('../src/slotOffers');
+const { normalizeClinicTimingInput, resolveClinicTiming } = require('../src/clinicTiming');
 
 require('../src/models');
 
@@ -2127,6 +2128,177 @@ test('WhatsApp dashboard warns when sessions sit on an ephemeral filesystem', as
   } finally {
     DashboardUser.findById = originalFindById;
     Doctor.findOne = originalDoctorFindOne;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+test('clinic timings fall back to environment defaults per doctor', () => {
+  const environment = {
+    OFFICE_START_HOUR: '8',
+    OFFICE_END_HOUR: '20',
+    APPOINTMENT_DURATION_MINUTES: '45',
+    APPOINTMENT_LOOKAHEAD_DAYS: '10'
+  };
+  assert.deepEqual(resolveClinicTiming({}, environment), {
+    officeStartHour: 8,
+    officeEndHour: 20,
+    appointmentDurationMinutes: 45,
+    appointmentLookaheadDays: 10,
+    usingEnvironment: true
+  });
+  assert.deepEqual(resolveClinicTiming(null, {}), {
+    officeStartHour: 9,
+    officeEndHour: 17,
+    appointmentDurationMinutes: 30,
+    appointmentLookaheadDays: 7,
+    usingEnvironment: true
+  });
+});
+
+test('clinic timings stay unique per doctor with no cross-contamination', () => {
+  const environment = { OFFICE_START_HOUR: '9', OFFICE_END_HOUR: '17' };
+  const morning = resolveClinicTiming({
+    doctorId: 'clinic-a', officeStartHour: 8, officeEndHour: 12, appointmentDurationMinutes: 30
+  }, environment);
+  const evening = resolveClinicTiming({
+    doctorId: 'clinic-b', officeStartHour: 16, officeEndHour: 22, appointmentDurationMinutes: 60
+  }, environment);
+
+  assert.deepEqual(
+    [morning.officeStartHour, morning.officeEndHour, morning.appointmentDurationMinutes],
+    [8, 12, 30]
+  );
+  assert.deepEqual(
+    [evening.officeStartHour, evening.officeEndHour, evening.appointmentDurationMinutes],
+    [16, 22, 60]
+  );
+  assert.notEqual(morning.officeStartHour, evening.officeStartHour);
+  // A partially configured doctor inherits only what it has not set itself.
+  const partial = resolveClinicTiming({ officeEndHour: 21 }, environment);
+  assert.equal(partial.officeStartHour, 9);
+  assert.equal(partial.officeEndHour, 21);
+});
+
+test('clinic timings reject invalid or inverted ranges', () => {
+  assert.equal(normalizeClinicTimingInput({ officeStartHour: 9, officeEndHour: 17 }).officeEndHour, 17);
+  assert.equal(normalizeClinicTimingInput({ officeStartHour: 18, officeEndHour: 9 }), null, 'closing must be after opening');
+  assert.equal(normalizeClinicTimingInput({ officeStartHour: 9, officeEndHour: 9 }), null, 'zero-length window');
+  assert.equal(normalizeClinicTimingInput({ officeStartHour: 25 }), null, 'hour above 23');
+  assert.equal(normalizeClinicTimingInput({ officeEndHour: 0 }), null, 'hour below 1');
+  assert.equal(normalizeClinicTimingInput({ appointmentDurationMinutes: 5 }), null, 'slot too short');
+  assert.equal(normalizeClinicTimingInput({ appointmentDurationMinutes: 600 }), null, 'slot too long');
+  assert.equal(normalizeClinicTimingInput({ appointmentLookaheadDays: 0 }), null);
+  assert.equal(normalizeClinicTimingInput({ appointmentLookaheadDays: 31 }), null);
+  assert.deepEqual(normalizeClinicTimingInput({}), {}, 'absent fields are left untouched');
+  assert.equal(normalizeClinicTimingInput({ appointmentLookaheadDays: '14' }).appointmentLookaheadDays, 14);
+});
+
+test('an inverted saved range falls back instead of producing no slots', () => {
+  const timing = resolveClinicTiming(
+    { officeStartHour: 20, officeEndHour: 10 },
+    { OFFICE_START_HOUR: '9', OFFICE_END_HOUR: '17' }
+  );
+  assert.equal(timing.officeStartHour, 9);
+  assert.equal(timing.officeEndHour, 17);
+});
+
+test('clinic timing fields are validated on the Doctor record', async () => {
+  const Doctor = mongoose.models.Doctor;
+  const doctor = new Doctor({
+    doctorId: 'timing-tenant',
+    email: 'timing@example.test',
+    officeStartHour: 8,
+    officeEndHour: 21,
+    appointmentDurationMinutes: 20,
+    appointmentLookaheadDays: 14
+  });
+  await assert.doesNotReject(doctor.validate());
+  assert.equal(doctor.officeStartHour, 8);
+  assert.equal(doctor.officeEndHour, 21);
+
+  const outOfRange = new Doctor({ doctorId: 'bad-timing', email: 'bad@example.test', officeEndHour: 30 });
+  await assert.rejects(outOfRange.validate());
+});
+
+test('doctor settings save and return clinic timings', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'clinic-timing-dashboard-secret-long';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalFindById = DashboardUser.findById;
+  const originalDoctorFindOne = Doctor.findOne;
+  const originalDoctorFindOneAndUpdate = Doctor.findOneAndUpdate;
+  const user = { _id: 'timing-user', role: 'DOCTOR', doctorId: 'timing-tenant', isActive: true };
+  let doctor = { doctorId: user.doctorId, isActive: true, setupComplete: false };
+  let savedUpdate;
+  DashboardUser.findById = () => ({ lean: async () => user });
+  Doctor.findOne = () => ({ lean: async () => doctor });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    savedUpdate = update;
+    doctor = { ...doctor, ...update.$set };
+    return { lean: async () => doctor };
+  };
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
+    const token = createSessionToken(user, secret, Date.now() + 60_000);
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` },
+      query: {},
+      body: {
+        doctorName: 'Dr. Timing',
+        clinicName: 'Timing Clinic',
+        basicCheckupFee: 500,
+        facilityPricing: [{ category: 'facility', name: 'OPD', price: 500 }],
+        consultationDetails: 'Walk-ins welcome.',
+        workingDays: [1, 2, 3, 4, 5],
+        offDays: [],
+        religion: 'Muslim',
+        welcomeMessage: '',
+        officeStartHour: 8,
+        officeEndHour: 13,
+        appointmentDurationMinutes: 20,
+        appointmentLookaheadDays: 14
+      }
+    };
+    const makeResponse = () => ({
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    });
+
+    let response = makeResponse();
+    const [settingsAuth, settingsHandler] = routes.get('PUT /api/dashboard/settings');
+    await settingsAuth(request, response, () => {});
+    await settingsHandler(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(savedUpdate.$set.officeStartHour, 8);
+    assert.equal(savedUpdate.$set.officeEndHour, 13);
+    assert.equal(savedUpdate.$set.appointmentDurationMinutes, 20);
+    assert.equal(savedUpdate.$set.appointmentLookaheadDays, 14);
+    assert.equal(response.body.officeStartHour, 8);
+    assert.equal(response.body.officeEndHour, 13);
+
+    // Inverted hours must be rejected outright.
+    request.body.officeStartHour = 18;
+    request.body.officeEndHour = 9;
+    response = makeResponse();
+    await settingsAuth(request, response, () => {});
+    await settingsHandler(request, response);
+    assert.equal(response.statusCode, 400);
+  } finally {
+    DashboardUser.findById = originalFindById;
+    Doctor.findOne = originalDoctorFindOne;
+    Doctor.findOneAndUpdate = originalDoctorFindOneAndUpdate;
     if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
     else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
   }

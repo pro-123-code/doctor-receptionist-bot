@@ -26,6 +26,7 @@ const {
   isMoreSlotRequest,
   paginateSlots: paginateSlotOffers
 } = require('./slotOffers');
+const { resolveClinicTiming, resolveEnvironmentTiming } = require('./clinicTiming');
 const { privacyPolicy, termsOfService } = require('./legalPages');
 
 const app = express();
@@ -78,13 +79,18 @@ if (process.env.GOOGLE_TIME_ZONE && process.env.GOOGLE_TIME_ZONE !== timeZone) {
   throw new Error('GOOGLE_TIME_ZONE must be Asia/Karachi');
 }
 
+// Office hours, slot length and booking window are now per-clinic settings. The
+// environment values are only fallbacks, so an invalid one is sanitised rather than
+// fatal: one bad default must never take the whole multi-tenant service down.
+const environmentTiming = resolveEnvironmentTiming(process.env);
 if (
   !Number.isInteger(appointmentDurationMinutes) || appointmentDurationMinutes < 15 ||
   !Number.isInteger(appointmentLookaheadDays) || appointmentLookaheadDays < 1 ||
   !Number.isInteger(officeStartHour) || !Number.isInteger(officeEndHour) ||
   officeStartHour < 0 || officeEndHour > 24 || officeStartHour >= officeEndHour
 ) {
-  throw new Error('Invalid appointment or office-hours configuration');
+  writeStartupLog(`WARNING: invalid appointment or office-hours environment configuration; `
+    + `falling back to ${JSON.stringify(environmentTiming)}. Each clinic can set its own timings from the dashboard.`);
 }
 
 
@@ -191,7 +197,7 @@ function getTimeRange(requestedDate) {
   }
 
   const start = new Date();
-  const end = new Date(start.getTime() + appointmentLookaheadDays * 24 * 60 * 60 * 1000);
+  const end = new Date(start.getTime() + resolveClinicTiming(null).appointmentLookaheadDays * 24 * 60 * 60 * 1000);
   return { timeMin: start.toISOString(), timeMax: end.toISOString() };
 }
 
@@ -240,12 +246,13 @@ function addLocalDays(parts, days) {
 
 function buildCandidateSlots(timeMin, timeMax, doctorProfile) {
   const slots = [];
+  const timing = resolveClinicTiming(doctorProfile);
   const rangeStart = new Date(timeMin);
   const rangeEnd = new Date(timeMax);
   const startParts = getZonedParts(rangeStart);
   let localDate = { year: startParts.year, month: startParts.month, day: startParts.day };
 
-  for (let dayOffset = 0; dayOffset <= appointmentLookaheadDays; dayOffset += 1) {
+  for (let dayOffset = 0; dayOffset <= timing.appointmentLookaheadDays; dayOffset += 1) {
     const date = addLocalDays(localDate, dayOffset);
     const noon = zonedDateTimeToUtc(date.year, date.month, date.day, 12, 0);
     const weekdayName = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(noon);
@@ -253,14 +260,14 @@ function buildCandidateSlots(timeMin, timeMax, doctorProfile) {
 
     if (isClinicOpenOnDate(date, doctorProfile)) {
       for (
-        let minutes = officeStartHour * 60;
-        minutes + appointmentDurationMinutes <= officeEndHour * 60;
-        minutes += appointmentDurationMinutes
+        let minutes = timing.officeStartHour * 60;
+        minutes + timing.appointmentDurationMinutes <= timing.officeEndHour * 60;
+        minutes += timing.appointmentDurationMinutes
       ) {
         const hour = Math.floor(minutes / 60);
         const minute = minutes % 60;
         const start = zonedDateTimeToUtc(date.year, date.month, date.day, hour, minute);
-        const end = new Date(start.getTime() + appointmentDurationMinutes * 60 * 1000);
+        const end = new Date(start.getTime() + timing.appointmentDurationMinutes * 60 * 1000);
 
         if (start >= rangeStart && start > new Date() && end <= rangeEnd) {
           slots.push({ start, end });
@@ -719,9 +726,9 @@ async function handleConversationMessage(sender, message, doctorProfile) {
     if (normalizedMessage.length > maxInputLength) {
       return `Meherbani karke ${maxInputLength} characters se chhoti tareekh bhejein.`;
     }
-    const requestedDate = parseRequestedDate(normalizedMessage, timeZone, appointmentLookaheadDays);
+    const requestedDate = parseRequestedDate(normalizedMessage, timeZone, resolveClinicTiming(doctorProfile).appointmentLookaheadDays);
     if (!requestedDate) {
-      return `Maazrat, tareekh samajh nahi aayi. Aaj se agle ${appointmentLookaheadDays} din ke andar koi tareekh batayein, misal: kal ya next Friday.`;
+      return `Maazrat, tareekh samajh nahi aayi. Aaj se agle ${resolveClinicTiming(doctorProfile).appointmentLookaheadDays} din ke andar koi tareekh batayein, misal: kal ya next Friday.`;
     }
 
     if (!isClinicOpenOnDate(requestedDate, doctorProfile)) {

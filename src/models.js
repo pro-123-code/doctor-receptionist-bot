@@ -139,6 +139,12 @@ const doctorSchema = new Schema({
   servicesList: { type: [String], default: [] },
   consultationDetails: { type: String, maxlength: 2000, default: '' },
   workingDays: { type: [Number], enum: [0, 1, 2, 3, 4, 5, 6], default: [1, 2, 3, 4, 5] },
+  // Per-clinic opening hours. Undefined means "use the environment default", so
+  // existing clinics need no migration.
+  officeStartHour: { type: Number, min: 0, max: 23 },
+  officeEndHour: { type: Number, min: 1, max: 24 },
+  appointmentDurationMinutes: { type: Number, min: 15, max: 240 },
+  appointmentLookaheadDays: { type: Number, min: 1, max: 30 },
   offDays: { type: [String], default: [] },
   religiousHolidayOpenDays: { type: [String], default: [] },
   religion: { type: String, enum: ['Christian', 'Muslim', 'Hindu', 'Other'], default: 'Other' },
