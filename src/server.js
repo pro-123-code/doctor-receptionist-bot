@@ -83,6 +83,11 @@ if (process.env.GOOGLE_TIME_ZONE && process.env.GOOGLE_TIME_ZONE !== timeZone) {
 // environment values are only fallbacks, so an invalid one is sanitised rather than
 // fatal: one bad default must never take the whole multi-tenant service down.
 const environmentTiming = resolveEnvironmentTiming(process.env);
+if (environmentTiming.appointmentLookaheadDays < 3) {
+  writeStartupLog(`WARNING: the fallback booking window is ${environmentTiming.appointmentLookaheadDays} day(s), `
+    + `so patients can only book that far ahead. Check APPOINTMENT_LOOKAHEAD_DAYS, and note each clinic can set `
+    + 'its own booking window from the dashboard.');
+}
 if (
   !Number.isInteger(appointmentDurationMinutes) || appointmentDurationMinutes < 15 ||
   !Number.isInteger(appointmentLookaheadDays) || appointmentLookaheadDays < 1 ||
