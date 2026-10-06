@@ -34,6 +34,9 @@ jobs:
       - name: Server module smoke test
         run: npm run smoke
 
+      - name: Dashboard contract check
+        run: npm run dashboard:check
+
       - name: Test suite
         run: npm test
 

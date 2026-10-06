@@ -8,79 +8,183 @@
   <link rel="manifest" href="/dashboard.webmanifest">
   <link rel="icon" href="/dashboard-icon.svg" type="image/svg+xml">
   <title>DoctorBot Dashboard</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta23/dist/css/tabler.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#F0FDFA', 100: '#CCFBF1', 200: '#99F6E4', 300: '#5EEAD4',
+              400: '#2DD4BF', 500: '#14B8A6', 600: '#0D9488', 700: '#0F766E',
+              800: '#115E59', 900: '#134E4A', 950: '#042F2E'
+            },
+            ink: { DEFAULT: '#1E293B', soft: '#64748B', faint: '#94A3B8' }
+          },
+          fontFamily: { sans: ['"Plus Jakarta Sans"', 'ui-sans-serif', 'system-ui', 'sans-serif'] },
+          boxShadow: {
+            card: '0 1px 2px 0 rgb(15 23 42 / 0.04), 0 1px 3px 0 rgb(15 23 42 / 0.06)',
+            lift: '0 10px 30px -12px rgb(15 23 42 / 0.25)'
+          },
+          borderRadius: { xl: '0.875rem', '2xl': '1.125rem' }
+        }
+      }
+    };
+  </script>
   <style>
-    :root { color-scheme: light; }
-    body { background: #f3f7f5; }
-    .clinic-bar { background: #176b5b; color: #fff; }
-    .clinic-mark { color: #176b5b; }
-    .login-wrap { max-width: 440px; margin: 9vh auto; }
-    .table td { vertical-align: top; }
-    .symptoms { min-width: 220px; max-width: 460px; white-space: pre-wrap; overflow-wrap: anywhere; }
-    #notice[hidden], #dashboard[hidden], #login[hidden], #clinic-setup-panel[hidden], #clinic-experience[hidden] { display: none !important; }
+    [hidden] { display: none !important; }
+    body { background: #F8FAFC; color: #1E293B; }
+    .surface { background: #fff; border: 1px solid #E2E8F0; border-radius: 1rem; box-shadow: 0 1px 2px 0 rgb(15 23 42 / 0.04); }
+    .field { width: 100%; border: 1px solid #CBD5E1; border-radius: .75rem; padding: .55rem .75rem; font-size: .925rem; background: #fff; transition: border-color .15s, box-shadow .15s; }
+    .field:hover { border-color: #94A3B8; }
+    .field:focus { outline: none; border-color: #0D9488; box-shadow: 0 0 0 3px rgb(13 148 136 / .18); }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; border-radius: .7rem; padding: .55rem 1rem; font-size: .9rem; font-weight: 600; transition: transform .12s, box-shadow .15s, background-color .15s, color .15s; cursor: pointer; }
+    .btn:active:not(:disabled) { transform: translateY(1px); }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+    .btn-primary { background: #0F766E; color: #fff; box-shadow: 0 1px 2px rgb(15 23 42 / .1); }
+    .btn-primary:hover:not(:disabled) { background: #115E59; box-shadow: 0 6px 16px -6px rgb(15 118 110 / .55); }
+    .btn-outline { background: #fff; color: #0F766E; border: 1px solid #99F6E4; }
+    .btn-outline:hover:not(:disabled) { background: #F0FDFA; border-color: #0D9488; }
+    .btn-ghost { background: transparent; color: #475569; }
+    .btn-ghost:hover:not(:disabled) { background: #F1F5F9; color: #0F766E; }
+    .btn-danger-ghost { background: transparent; color: #E11D48; border: 1px solid #FECDD3; }
+    .btn-danger-ghost:hover:not(:disabled) { background: #FFF1F2; }
+    .btn-sm { padding: .35rem .7rem; font-size: .82rem; border-radius: .6rem; }
+    .chip { display: inline-flex; align-items: center; gap: .4rem; padding: .3rem .7rem; border-radius: 999px; font-size: .78rem; font-weight: 600; }
+    .chip-teal { background: #F0FDFA; color: #0F766E; border: 1px solid #99F6E4; }
+    .chip-amber { background: #FFFBEB; color: #B45309; border: 1px solid #FDE68A; }
+    .eyebrow { font-size: .72rem; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: #0F766E; }
+    .hint { font-size: .8rem; color: #64748B; }
+    .label { display: block; font-size: .8rem; font-weight: 600; color: #334155; margin-bottom: .3rem; }
+    .navlink { display: flex; align-items: center; gap: .6rem; padding: .55rem .75rem; border-radius: .7rem; font-size: .875rem; font-weight: 600; color: #475569; transition: background-color .15s, color .15s; }
+    .navlink:hover { background: #F1F5F9; color: #0F766E; }
+    table.data { width: 100%; border-collapse: separate; border-spacing: 0; }
+    table.data th { text-align: left; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; color: #64748B; font-weight: 700; padding: .7rem 1rem; background: #F8FAFC; border-bottom: 1px solid #E2E8F0; }
+    table.data td { padding: .85rem 1rem; font-size: .9rem; border-bottom: 1px solid #F1F5F9; vertical-align: top; }
+    table.data tbody tr { transition: background-color .12s; }
+    table.data tbody tr:hover { background: #F8FAFC; }
+    .symptoms { min-width: 200px; max-width: 420px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 999px; border: 3px solid #F8FAFC; }
+    ::-webkit-scrollbar-track { background: #F8FAFC; }
   </style>
 </head>
-<body>
-  <header class="navbar navbar-expand-md clinic-bar">
-    <div class="container-xl">
-      <span id="brand" class="navbar-brand text-white">DoctorBot</span>
-      <div class="navbar-nav flex-row order-md-last">
-        <button id="logout" class="btn btn-outline-light btn-sm" type="button" hidden>Sign out</button>
-      </div>
-    </div>
-  </header>
+<body class="min-h-screen font-sans text-ink antialiased">
 
-  <main class="container-xl py-4">
-    <div id="notice" class="alert alert-danger" role="alert" hidden></div>
-
-    <section id="login" class="login-wrap" aria-labelledby="login-title">
-      <div class="card">
-        <div class="card-body p-4">
-          <div class="clinic-mark fw-bold mb-2">CLINIC DASHBOARD</div>
-          <h1 id="login-title" class="h2">Sign in</h1>
-          <p class="text-secondary">View appointments booked for your clinic.</p>
-          <form id="login-form">
-            <label class="form-label" for="email">Email</label>
-            <input id="email" class="form-control mb-3" type="email" autocomplete="username" required>
-            <label class="form-label" for="password">Password</label>
-            <input id="password" class="form-control mb-3" type="password" autocomplete="current-password" required>
-            <button class="btn btn-primary w-100" type="submit">Sign in</button>
+    <section id="login" class="min-h-screen flex items-center justify-center px-4 py-10" aria-labelledby="login-title">
+      <div class="w-full max-w-md">
+        <div class="text-center mb-7">
+          <div class="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-700 text-white text-xl font-extrabold shadow-lift mb-4">D</div>
+          <div class="eyebrow">DoctorBot</div>
+          <h1 id="login-title" class="mt-1 text-3xl font-extrabold tracking-tight text-slate-900">Clinic Dashboard</h1>
+          <p class="mt-2 text-ink-soft text-sm">Sign in to manage appointments, clinic setup and connections.</p>
+        </div>
+        <div class="surface p-7">
+          <form id="login-form" class="space-y-4">
+            <div>
+              <label class="label" for="email">Email</label>
+              <input id="email" class="field" type="email" autocomplete="username" required>
+            </div>
+            <div>
+              <label class="label" for="password">Password</label>
+              <input id="password" class="field" type="password" autocomplete="current-password" required>
+            </div>
+            <button class="btn btn-primary w-full" type="submit">Sign in</button>
           </form>
         </div>
+        <p class="hint text-center mt-5">Secured with signed, HttpOnly sessions.</p>
       </div>
     </section>
 
-    <section id="doctor-dashboard" hidden>
-      <section id="clinic-setup-panel" class="mb-5" aria-labelledby="setup-title" hidden>
-        <div id="clinic-setup-eyebrow" class="clinic-mark fw-bold">CLINIC SETUP</div>
-        <h1 id="setup-title" class="h2">Configure your clinic</h1>
-        <form id="doctor-settings-form" class="row g-3">
-          <div class="col-sm-6"><label class="form-label" for="profile-doctor-name">Doctor name</label><input id="profile-doctor-name" class="form-control" required maxlength="120"></div>
-          <div class="col-sm-6"><label class="form-label" for="profile-clinic-name">Clinic name</label><input id="profile-clinic-name" class="form-control" required maxlength="160"></div>
-          <div id="profile-email-field" class="col-sm-6" hidden><label class="form-label" for="profile-email">Doctor login email</label><input id="profile-email" class="form-control" type="email"></div>
-          <div class="col-sm-6"><label class="form-label" for="profile-religion">Religion</label><select id="profile-religion" class="form-select" required><option value="Christian">Christian</option><option value="Muslim">Muslim</option><option value="Hindu">Hindu</option><option value="Other">Other</option></select></div>
-          <div class="col-md-6"><label class="form-label" for="basic-checkup-fee">Basic checkup fee (Rs.)</label><input id="basic-checkup-fee" class="form-control" type="number" min="0" max="10000000" step="0.01" required></div>
-          <div class="col-12">
-            <label class="form-label" for="facility-pricing-list">Facilities, treatments and prices</label>
-            <div id="facility-pricing-list" class="vstack gap-2"></div>
-            <button id="add-facility-pricing" class="btn btn-outline-secondary btn-sm mt-2" type="button">Add facility or treatment</button>
+    <div id="app-shell" class="min-h-screen md:flex" hidden>
+      <aside class="hidden md:flex md:w-64 lg:w-72 shrink-0 flex-col border-r border-slate-200 bg-white">
+        <div class="px-6 py-6 border-b border-slate-100">
+          <div class="flex items-center gap-3">
+            <div class="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-brand-700 text-white font-extrabold shadow-card">D</div>
+            <div class="min-w-0">
+              <p id="brand" class="text-sm font-bold text-slate-900 truncate">DoctorBot</p>
+              <p class="text-xs text-ink-faint truncate">Reception assistant</p>
+            </div>
           </div>
-          <div class="col-12"><label class="form-label" for="profile-consultation-details">Consultation details</label><textarea id="profile-consultation-details" class="form-control" rows="3" maxlength="2000" required></textarea></div>
-          <fieldset class="col-12">
-            <legend class="form-label">Clinic timings</legend>
-            <p class="form-hint mb-2">Only appointment times inside these hours are ever offered to patients. These settings belong to your clinic only.</p>
-            <div class="row g-3">
-              <div class="col-sm-6 col-lg-3">
-                <label class="form-label" for="office-start-hour">Opens at</label>
-                <select id="office-start-hour" class="form-select"></select>
+        </div>
+        <nav class="flex-1 px-3 py-5 space-y-1 overflow-y-auto" aria-label="Sections">
+          <a class="navlink" href="#appointments-anchor">
+            <span class="h-1.5 w-1.5 rounded-full bg-brand-500"></span>Appointments
+          </a>
+          <a class="navlink" href="#clinic-timings-anchor">
+            <span class="h-1.5 w-1.5 rounded-full bg-sky-500"></span>Clinic setup
+          </a>
+          <a class="navlink" href="#connections-anchor">
+            <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Connections
+          </a>
+          <a id="admin-nav-link" class="navlink" href="#admin-doctors-anchor" hidden>
+            <span class="h-1.5 w-1.5 rounded-full bg-violet-500"></span>Doctor accounts
+          </a>
+          <a id="admin-nav-create" class="navlink" href="#admin-create-anchor" hidden>
+            <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>Add a doctor
+          </a>
+        </nav>
+        <div class="p-4 border-t border-slate-100">
+          <div class="rounded-xl bg-brand-50 border border-brand-100 px-4 py-3">
+            <p class="text-xs font-bold text-brand-800">DoctorBot Assistant</p>
+            <p class="text-xs text-brand-700 mt-0.5">Booking, reminders and reports.</p>
+          </div>
+        </div>
+      </aside>
+
+      <div class="flex-1 min-w-0 flex flex-col">
+        <header class="sticky top-0 z-20 bg-white/85 backdrop-blur border-b border-slate-200">
+          <div class="px-4 sm:px-6 lg:px-8 py-3.5 flex items-center justify-between gap-3">
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="md:hidden inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-700 text-white font-extrabold">D</div>
+              <div class="min-w-0">
+                <p id="brand-mobile" class="text-sm font-bold text-slate-900 truncate md:hidden">DoctorBot</p>
+                <p class="hidden md:block text-xs text-ink-faint">Appointments &amp; clinic operations</p>
               </div>
-              <div class="col-sm-6 col-lg-3">
-                <label class="form-label" for="office-end-hour">Closes at</label>
-                <select id="office-end-hour" class="form-select"></select>
+            </div>
+            <button id="logout" class="btn btn-ghost btn-sm shrink-0" type="button" hidden>Sign out</button>
+          </div>
+        </header>
+
+        <main class="flex-1 px-4 sm:px-6 lg:px-8 py-6 lg:py-9 max-w-[1400px] w-full mx-auto">
+          <div id="notice" class="mb-6 rounded-xl border px-4 py-3 text-sm font-semibold" role="alert" hidden></div>
+
+          <section id="doctor-dashboard" class="space-y-6" hidden>
+      <section id="clinic-setup-panel" class="surface p-6 sm:p-8" aria-labelledby="setup-title" hidden>
+        <div id="clinic-setup-eyebrow" class="eyebrow">Clinic setup</div>
+        <h1 id="setup-title" class="mt-1 text-2xl font-extrabold tracking-tight text-slate-900">Configure your clinic</h1>
+        <p class="hint mt-1.5 mb-6">Everything a patient hears or sees in WhatsApp comes from these settings.</p>
+        <form id="doctor-settings-form" class="space-y-7">
+
+          <fieldset class="space-y-4">
+            <legend class="text-sm font-bold text-slate-900 pb-1">Clinic profile</legend>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div><label class="label" for="profile-doctor-name">Doctor name</label><input id="profile-doctor-name" class="field" required maxlength="120"></div>
+              <div><label class="label" for="profile-clinic-name">Clinic name</label><input id="profile-clinic-name" class="field" required maxlength="160"></div>
+              <div id="profile-email-field" hidden><label class="label" for="profile-email">Doctor login email</label><input id="profile-email" class="field" type="email"></div>
+              <div><label class="label" for="profile-religion">Religion</label><select id="profile-religion" class="field" required><option value="Christian">Christian</option><option value="Muslim">Muslim</option><option value="Hindu">Hindu</option><option value="Other">Other</option></select></div>
+              <div><label class="label" for="basic-checkup-fee">Basic checkup fee (Rs.)</label><input id="basic-checkup-fee" class="field" type="number" min="0" max="10000000" step="0.01" required></div>
+            </div>
+          </fieldset>
+
+          <fieldset id="clinic-timings-anchor" class="scroll-mt-24 rounded-2xl bg-brand-50/60 border border-brand-100 p-5 sm:p-6">
+            <legend class="text-sm font-bold text-brand-900">Clinic timings</legend>
+            <p class="hint mt-1 mb-4">Only appointment times inside these hours are ever offered to patients. These settings belong to your clinic only.</p>
+            <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <label class="label" for="office-start-hour">Opens at</label>
+                <select id="office-start-hour" class="field"></select>
               </div>
-              <div class="col-sm-6 col-lg-3">
-                <label class="form-label" for="appointment-duration">Slot length</label>
-                <select id="appointment-duration" class="form-select">
+              <div>
+                <label class="label" for="office-end-hour">Closes at</label>
+                <select id="office-end-hour" class="field"></select>
+              </div>
+              <div>
+                <label class="label" for="appointment-duration">Slot length</label>
+                <select id="appointment-duration" class="field">
                   <option value="15">15 minutes</option>
                   <option value="20">20 minutes</option>
                   <option value="30">30 minutes</option>
@@ -88,138 +192,239 @@
                   <option value="60">60 minutes</option>
                 </select>
               </div>
-              <div class="col-sm-6 col-lg-3">
-                <label class="form-label" for="appointment-lookahead">Book up to (days)</label>
-                <input id="appointment-lookahead" class="form-control" type="number" min="1" max="30" step="1" required>
+              <div>
+                <label class="label" for="appointment-lookahead">Book up to (days)</label>
+                <input id="appointment-lookahead" class="field" type="number" min="1" max="30" step="1" required>
               </div>
             </div>
-            <p id="timing-summary" class="form-hint mb-0 mt-2"></p>
-            <p id="timing-error" class="text-danger mb-0 mt-1" hidden></p>
+            <p id="timing-summary" class="hint mt-3"></p>
+            <p id="timing-error" class="mt-1 text-sm font-semibold text-rose-600" hidden></p>
           </fieldset>
-          <fieldset class="col-12">
-            <legend class="form-label">Working days</legend>
-            <div class="d-flex flex-wrap gap-3">
-              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="0"> Sunday</label>
-              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="1"> Monday</label>
-              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="2"> Tuesday</label>
-              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="3"> Wednesday</label>
-              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="4"> Thursday</label>
-              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="5"> Friday</label>
-              <label class="form-check"><input class="form-check-input working-day" type="checkbox" value="6"> Saturday</label>
+
+          <fieldset class="space-y-4">
+            <legend class="text-sm font-bold text-slate-900 pb-1">Facilities, treatments and prices</legend>
+            <div class="rounded-2xl border border-slate-200 overflow-hidden">
+              <div class="hidden sm:grid grid-cols-12 gap-3 px-4 py-2.5 bg-slate-50 text-xs font-bold uppercase tracking-wide text-ink-soft">
+                <div class="col-span-5">Name</div>
+                <div class="col-span-3">Category</div>
+                <div class="col-span-3">Price (Rs.)</div>
+                <div class="col-span-1"></div>
+              </div>
+              <div id="facility-pricing-list" class="divide-y divide-slate-100"></div>
+            </div>
+            <button id="add-facility-pricing" class="btn btn-outline btn-sm" type="button">Add facility or treatment</button>
+          </fieldset>
+
+          <fieldset class="space-y-4">
+            <legend class="text-sm font-bold text-slate-900 pb-1">Patient information</legend>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div><label class="label" for="profile-consultation-details">Consultation details</label><textarea id="profile-consultation-details" class="field" rows="3" maxlength="2000" required></textarea></div>
+              <div><label class="label" for="profile-welcome">Welcome message</label><textarea id="profile-welcome" class="field" rows="3" maxlength="1000"></textarea></div>
             </div>
           </fieldset>
-          <div class="col-md-6">
-            <label class="form-label" for="off-day-date">Clinic off-days</label>
-            <div class="d-flex gap-2"><input id="off-day-date" class="form-control" type="date"><button id="add-off-day" class="btn btn-outline-secondary" type="button">Add date</button></div>
-            <ul id="off-day-list" class="list-unstyled mt-2 mb-0" aria-live="polite"></ul>
-          </div>
-          <fieldset class="col-12">
-            <legend class="form-label">Religious holidays</legend>
-            <div id="religious-holiday-list" class="d-flex flex-wrap gap-3"></div>
-          </fieldset>
-          <div class="col-md-6"><label class="form-label" for="profile-welcome">Welcome message</label><textarea id="profile-welcome" class="form-control" rows="3" maxlength="1000"></textarea></div>
-          <div class="col-12 d-flex gap-2"><button class="btn btn-primary" type="submit">Save clinic setup</button><button id="cancel-clinic-setup" class="btn btn-outline-secondary" type="button" hidden>Cancel</button></div>
-        </form>
-      </section>
-      <div id="clinic-experience" hidden>
-      <div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-4">
-        <div>
-          <div class="clinic-mark fw-bold">DAILY SCHEDULE</div>
-          <h1 class="h2 mb-0">Appointments</h1>
-        </div>
-        <div class="d-flex flex-wrap align-items-end gap-3">
-          <form id="date-form" class="d-flex align-items-end gap-2">
-            <div>
-              <label class="form-label" for="report-date">Clinic date</label>
-              <input id="report-date" class="form-control" type="date" required>
+
+          <fieldset class="space-y-4">
+            <legend class="text-sm font-bold text-slate-900 pb-1">Working days</legend>
+            <div class="flex flex-wrap gap-2">
+              <label class="chip !cursor-pointer border-slate-200 !bg-white !text-slate-600 has-[:checked]:!bg-brand-600 has-[:checked]:!border-brand-600 has-[:checked]:!text-white hover:!border-brand-300 transition-colors">
+                <input class="form-check-input working-day sr-only" type="checkbox" value="0"> Sunday
+              </label>
+              <label class="chip !cursor-pointer border-slate-200 !bg-white !text-slate-600 has-[:checked]:!bg-brand-600 has-[:checked]:!border-brand-600 has-[:checked]:!text-white hover:!border-brand-300 transition-colors">
+                <input class="form-check-input working-day sr-only" type="checkbox" value="1"> Monday
+              </label>
+              <label class="chip !cursor-pointer border-slate-200 !bg-white !text-slate-600 has-[:checked]:!bg-brand-600 has-[:checked]:!border-brand-600 has-[:checked]:!text-white hover:!border-brand-300 transition-colors">
+                <input class="form-check-input working-day sr-only" type="checkbox" value="2"> Tuesday
+              </label>
+              <label class="chip !cursor-pointer border-slate-200 !bg-white !text-slate-600 has-[:checked]:!bg-brand-600 has-[:checked]:!border-brand-600 has-[:checked]:!text-white hover:!border-brand-300 transition-colors">
+                <input class="form-check-input working-day sr-only" type="checkbox" value="3"> Wednesday
+              </label>
+              <label class="chip !cursor-pointer border-slate-200 !bg-white !text-slate-600 has-[:checked]:!bg-brand-600 has-[:checked]:!border-brand-600 has-[:checked]:!text-white hover:!border-brand-300 transition-colors">
+                <input class="form-check-input working-day sr-only" type="checkbox" value="4"> Thursday
+              </label>
+              <label class="chip !cursor-pointer border-slate-200 !bg-white !text-slate-600 has-[:checked]:!bg-brand-600 has-[:checked]:!border-brand-600 has-[:checked]:!text-white hover:!border-brand-300 transition-colors">
+                <input class="form-check-input working-day sr-only" type="checkbox" value="5"> Friday
+              </label>
+              <label class="chip !cursor-pointer border-slate-200 !bg-white !text-slate-600 has-[:checked]:!bg-brand-600 has-[:checked]:!border-brand-600 has-[:checked]:!text-white hover:!border-brand-300 transition-colors">
+                <input class="form-check-input working-day sr-only" type="checkbox" value="6"> Saturday
+              </label>
             </div>
-            <button class="btn btn-primary" type="submit">View</button>
-          </form>
-          <div>
-            <p id="calendar-connection-status" class="text-secondary mb-1" aria-live="polite"></p>
-            <a id="connect-calendar" class="btn btn-outline-primary" href="/api/auth/google" hidden>Connect Google Calendar</a>
-            <button id="disconnect-calendar" class="btn btn-outline-danger btn-sm ms-2" type="button" hidden>Disconnect</button>
-            <div id="calendar-panel" class="mt-2" hidden>
-              <div class="d-flex flex-wrap align-items-end gap-2">
-                <div>
-                  <label class="form-label mb-1" for="google-calendar-id">Calendar ID</label>
-                  <input id="google-calendar-id" class="form-control form-control-sm" style="min-width:260px" placeholder="primary or calendar email">
+          </fieldset>
+
+          <fieldset class="space-y-4">
+            <legend class="text-sm font-bold text-slate-900 pb-1">Closures</legend>
+            <div class="grid gap-6 sm:grid-cols-2">
+              <div>
+                <label class="label" for="off-day-date">Clinic off-days</label>
+                <div class="flex gap-2">
+                  <input id="off-day-date" class="field" type="date">
+                  <button id="add-off-day" class="btn btn-outline shrink-0" type="button">Add date</button>
                 </div>
-                <button id="save-calendar-id" class="btn btn-outline-secondary btn-sm" type="button">Save &amp; test</button>
-                <button id="test-calendar" class="btn btn-outline-primary btn-sm" type="button">Test connection</button>
+                <ul id="off-day-list" class="mt-3 space-y-2" aria-live="polite"></ul>
               </div>
-              <p id="calendar-test-result" class="mb-0 mt-2" aria-live="polite"></p>
+              <div>
+                <p class="label">Religious holidays</p>
+                <p class="hint mb-2">Tick a holiday to keep the clinic open that day.</p>
+                <div id="religious-holiday-list" class="space-y-2"></div>
+              </div>
             </div>
-            <p id="calendar-redirect-uri" class="form-hint mt-2 mb-0" hidden></p>
-            <p id="calendar-oauth-setup" class="form-hint mt-2 mb-0" hidden>Calendar connection needs Google OAuth credentials, a registered redirect URI, and a valid credential-encryption key.</p>
-            <p id="calendar-setup-steps" class="form-hint mt-2 mb-0" hidden></p>
+          </fieldset>
+
+          <div class="flex flex-wrap gap-3 pt-2 border-t border-slate-100">
+            <button class="btn btn-primary" type="submit">Save clinic setup</button>
+            <button id="cancel-clinic-setup" class="btn btn-ghost" type="button" hidden>Cancel</button>
+          </div>
+        </form>
+      </section>
+      <div id="clinic-experience" class="space-y-6" hidden>
+      <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Quick stats">
+        <div class="surface p-5 transition-shadow duration-200 hover:shadow-lift">
+          <p class="eyebrow">Appointments</p>
+          <p id="stat-today" class="mt-2 text-3xl font-extrabold text-slate-900">&mdash;</p>
+          <p id="stat-today-label" class="hint mt-1">on the selected date</p>
+        </div>
+        <div class="surface p-5 transition-shadow duration-200 hover:shadow-lift">
+          <p class="eyebrow">Clinic hours</p>
+          <p id="stat-hours" class="mt-2 text-lg font-bold text-slate-900">&mdash;</p>
+          <p id="stat-hours-label" class="hint mt-1">bookable window</p>
+        </div>
+        <div class="surface p-5 transition-shadow duration-200 hover:shadow-lift">
+          <p class="eyebrow">Google Calendar</p>
+          <p id="stat-calendar" class="mt-2 text-lg font-bold text-slate-900">&mdash;</p>
+          <p class="hint mt-1">booking engine</p>
+        </div>
+        <div class="surface p-5 transition-shadow duration-200 hover:shadow-lift">
+          <p class="eyebrow">WhatsApp</p>
+          <p id="stat-whatsapp" class="mt-2 text-lg font-bold text-slate-900">&mdash;</p>
+          <p class="hint mt-1">reception channel</p>
+        </div>
+      </section>
+
+      <section id="appointments-anchor" class="surface scroll-mt-24" aria-labelledby="appointments-title">
+        <div class="flex flex-wrap items-end justify-between gap-4 p-5 sm:p-6 border-b border-slate-100">
+          <div>
+            <p class="eyebrow">Daily schedule</p>
+            <h1 id="appointments-title" class="mt-1 text-2xl font-extrabold tracking-tight text-slate-900">Appointments</h1>
+          </div>
+          <div class="flex flex-wrap items-end gap-3">
+            <form id="date-form" class="flex items-end gap-2">
+              <div>
+                <label class="label" for="report-date">Clinic date</label>
+                <input id="report-date" class="field" type="date" required>
+              </div>
+              <button class="btn btn-primary" type="submit">View</button>
+            </form>
+            <button id="refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
           </div>
         </div>
-      </div>
 
-      <div class="d-flex align-items-center justify-content-between border-bottom pb-2 mb-3">
-        <p id="result-count" class="text-secondary mb-0" aria-live="polite"></p>
-        <button id="refresh" class="btn btn-outline-secondary btn-sm" type="button">Refresh</button>
-      </div>
+        <div class="overflow-x-auto">
+          <table class="data">
+            <thead>
+              <tr><th>Patient</th><th>WhatsApp</th><th>Symptoms</th><th>Slot</th></tr>
+            </thead>
+            <tbody id="appointments"></tbody>
+          </table>
+        </div>
+        <p id="empty-state" class="px-6 py-10 text-center text-ink-soft text-sm" hidden>No appointments booked for this date.</p>
+        <div class="px-5 sm:px-6 py-3 border-t border-slate-100">
+          <p id="result-count" class="hint" aria-live="polite"></p>
+        </div>
+      </section>
 
-      <div class="table-responsive">
-        <table class="table table-vcenter table-striped">
-          <thead>
-            <tr><th>Patient Name</th><th>WhatsApp Number</th><th>Symptoms</th><th>Appointment Slot</th></tr>
-          </thead>
-          <tbody id="appointments"></tbody>
-        </table>
-      </div>
-      <p id="empty-state" class="text-secondary py-4" hidden>No appointments booked for this date.</p>
+      <section id="connections-anchor" class="surface scroll-mt-24" aria-labelledby="settings-title">
+        <div class="p-5 sm:p-6 border-b border-slate-100">
+          <p class="eyebrow">Integrations</p>
+          <h2 id="settings-title" class="mt-1 text-xl font-extrabold text-slate-900">Bot settings</h2>
+        </div>
 
-      <section class="mt-5" aria-labelledby="settings-title">
-        <h2 id="settings-title" class="h3">Bot settings</h2>
-        <button id="edit-clinic-setup" class="btn btn-outline-primary" type="button">Edit clinic setup</button>
-        <div class="border-top pt-3" aria-labelledby="whatsapp-title">
-          <h3 id="whatsapp-title" class="h4">WhatsApp connection</h3>
-          <p id="whatsapp-connection-status" class="text-secondary" aria-live="polite">Not connected</p>
-          <p id="whatsapp-session-notice" class="text-warning" hidden></p>
-          <button id="connect-whatsapp" class="btn btn-success" type="button">Connect WhatsApp</button>
-          <div id="whatsapp-qr-panel" class="mt-3" hidden>
-            <img id="whatsapp-qr" width="320" height="320" alt="WhatsApp device-linking QR code">
-            <p class="text-secondary mt-2">On your phone, open WhatsApp, choose Linked devices, then scan this code.</p>
+        <div class="p-5 sm:p-6 border-b border-slate-100">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+              <h3 class="text-sm font-bold text-slate-900">Google Calendar</h3>
+              <p id="calendar-connection-status" class="hint mt-1" aria-live="polite"></p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <a id="connect-calendar" class="btn btn-outline btn-sm" href="/api/auth/google" hidden>Connect Google Calendar</a>
+              <button id="disconnect-calendar" class="btn btn-danger-ghost btn-sm" type="button" hidden>Disconnect</button>
+            </div>
+          </div>
+          <div id="calendar-panel" class="mt-4 hidden">
+            <div class="flex flex-wrap items-end gap-3">
+              <div class="min-w-[240px] flex-1">
+                <label class="label" for="google-calendar-id">Calendar ID</label>
+                <input id="google-calendar-id" class="field" placeholder="primary or calendar email">
+              </div>
+              <button id="save-calendar-id" class="btn btn-outline btn-sm" type="button">Save &amp; test</button>
+              <button id="test-calendar" class="btn btn-primary btn-sm" type="button">Test connection</button>
+            </div>
+            <p id="calendar-test-result" class="mt-3 text-sm font-semibold" aria-live="polite"></p>
+          </div>
+          <p id="calendar-redirect-uri" class="hint mt-3" hidden></p>
+          <p id="calendar-oauth-setup" class="hint mt-3" hidden>Calendar connection needs Google OAuth credentials, a registered redirect URI, and a valid credential-encryption key.</p>
+          <p id="calendar-setup-steps" class="hint mt-3" hidden></p>
+        </div>
+
+        <div class="p-5 sm:p-6">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+              <h3 id="whatsapp-title" class="text-sm font-bold text-slate-900">WhatsApp connection</h3>
+              <p id="whatsapp-connection-status" class="hint mt-1" aria-live="polite">Not connected</p>
+              <p id="whatsapp-session-notice" class="mt-2 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2" hidden></p>
+            </div>
+            <button id="connect-whatsapp" class="btn btn-primary btn-sm" type="button">Connect WhatsApp</button>
+          </div>
+          <div id="whatsapp-qr-panel" class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-5 inline-block" hidden>
+            <img id="whatsapp-qr" width="240" height="240" class="rounded-lg" alt="WhatsApp device-linking QR code">
+            <p class="hint mt-3">On your phone, open WhatsApp, choose Linked devices, then scan this code.</p>
           </div>
         </div>
+      </section>
+
+      <section class="surface p-5 sm:p-6 flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 class="text-sm font-bold text-slate-900">Clinic profile, timings and prices</h2>
+          <p class="hint mt-1">Control what patients hear on WhatsApp.</p>
+        </div>
+        <button id="edit-clinic-setup" class="btn btn-outline" type="button">Edit clinic setup</button>
       </section>
       </div>
     </section>
 
-    <section id="admin-dashboard" hidden>
-      <div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-4">
-        <div>
-          <div class="clinic-mark fw-bold">SUPERADMIN</div>
-          <h1 class="h2 mb-0">Doctor accounts</h1>
+    <section id="admin-dashboard" class="space-y-6" hidden>
+      <section id="admin-doctors-anchor" class="surface scroll-mt-24" aria-labelledby="admin-title">
+        <div class="flex flex-wrap items-end justify-between gap-4 p-5 sm:p-6 border-b border-slate-100">
+          <div>
+            <p class="eyebrow">Superadmin</p>
+            <h1 id="admin-title" class="mt-1 text-2xl font-extrabold tracking-tight text-slate-900">Doctor accounts</h1>
+          </div>
+          <button id="admin-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
         </div>
-        <button id="admin-refresh" class="btn btn-outline-secondary" type="button">Refresh</button>
-      </div>
+        <div class="overflow-x-auto">
+          <table class="data">
+            <thead>
+              <tr><th>Doctor</th><th>Clinic</th><th>Email</th><th>Total</th><th>Upcoming</th><th>Setup</th><th>Calendar</th><th>Status</th><th>Access</th></tr>
+            </thead>
+            <tbody id="doctor-accounts"></tbody>
+          </table>
+        </div>
+      </section>
 
-      <div class="table-responsive mb-5">
-        <table class="table table-vcenter table-striped">
-          <thead>
-            <tr><th>Doctor</th><th>Clinic</th><th>Email</th><th>Total</th><th>Upcoming</th><th>Setup</th><th>Calendar</th><th>Status</th><th>Access</th></tr>
-          </thead>
-          <tbody id="doctor-accounts"></tbody>
-        </table>
-      </div>
-
-      <section aria-labelledby="create-doctor-title">
-        <h2 id="create-doctor-title" class="h3">Add a doctor</h2>
-        <p class="text-secondary">Only the login account is created here. Facilities, pricing, schedule, and holidays are managed in one place — the doctor's clinic setup — which you can also edit anytime via the Edit button.</p>
-        <form id="create-doctor-form" class="row g-3">
-          <div class="col-sm-6"><label class="form-label" for="doctor-name">Doctor name</label><input id="doctor-name" name="doctorName" class="form-control" required maxlength="120"></div>
-          <div class="col-sm-6"><label class="form-label" for="clinic-name">Clinic name</label><input id="clinic-name" name="clinicName" class="form-control" required maxlength="160"></div>
-          <div class="col-sm-6"><label class="form-label" for="doctor-email">Login email</label><input id="doctor-email" name="email" class="form-control" type="email" required></div>
-          <div class="col-sm-6"><label class="form-label" for="doctor-password">Temporary password (12+ characters)</label><input id="doctor-password" name="password" class="form-control" type="password" minlength="12" required autocomplete="new-password"></div>
-          <div class="col-sm-6"><label class="form-label" for="doctor-welcome">Welcome message</label><textarea id="doctor-welcome" name="welcomeMessage" class="form-control" rows="4" maxlength="1000"></textarea></div>
-          <div class="col-12"><button class="btn btn-primary" type="submit">Create doctor account</button></div>
+      <section id="admin-create-anchor" class="surface scroll-mt-24" aria-labelledby="create-doctor-title">
+        <div class="p-5 sm:p-6 border-b border-slate-100">
+          <h2 id="create-doctor-title" class="text-xl font-extrabold text-slate-900">Add a doctor</h2>
+          <p class="hint mt-1.5">Only the login account is created here. Facilities, pricing, schedule, and holidays are managed in one place — the doctor's clinic setup — which you can also edit anytime via the Edit button.</p>
+        </div>
+        <form id="create-doctor-form" class="p-5 sm:p-6 grid gap-4 sm:grid-cols-2">
+          <div><label class="label" for="doctor-name">Doctor name</label><input id="doctor-name" name="doctorName" class="field" required maxlength="120"></div>
+          <div><label class="label" for="clinic-name">Clinic name</label><input id="clinic-name" name="clinicName" class="field" required maxlength="160"></div>
+          <div><label class="label" for="doctor-email">Login email</label><input id="doctor-email" name="email" class="field" type="email" required></div>
+          <div><label class="label" for="doctor-password">Temporary password (12+ characters)</label><input id="doctor-password" name="password" class="field" type="password" minlength="12" required autocomplete="new-password"></div>
+          <div class="sm:col-span-2"><label class="label" for="doctor-welcome">Welcome message</label><textarea id="doctor-welcome" name="welcomeMessage" class="field" rows="3" maxlength="1000"></textarea></div>
+          <div class="sm:col-span-2"><button class="btn btn-primary" type="submit">Create doctor account</button></div>
         </form>
       </section>
     </section>
+    </div>
   </main>
 
   <script>
@@ -232,6 +437,15 @@
     const count = document.querySelector('#result-count');
     const emptyState = document.querySelector('#empty-state');
     const logoutButton = document.querySelector('#logout');
+    const appShell = document.querySelector('#app-shell');
+    const brandMobile = document.querySelector('#brand-mobile');
+    const adminNavLink = document.querySelector('#admin-nav-link');
+    const adminNavCreate = document.querySelector('#admin-nav-create');
+    const statToday = document.querySelector('#stat-today');
+    const statTodayLabel = document.querySelector('#stat-today-label');
+    const statHours = document.querySelector('#stat-hours');
+    const statCalendar = document.querySelector('#stat-calendar');
+    const statWhatsapp = document.querySelector('#stat-whatsapp');
     const doctorRows = document.querySelector('#doctor-accounts');
     const setupPanel = document.querySelector('#clinic-setup-panel');
     const setupTitle = document.querySelector('#setup-title');
@@ -255,6 +469,7 @@
     let editingAdminDoctorId = null;
 
     function showError(message) {
+      notice.className = 'mb-6 rounded-xl border px-4 py-3 text-sm font-semibold bg-rose-50 border-rose-200 text-rose-800';
       notice.textContent = message;
       notice.hidden = false;
     }
@@ -265,10 +480,15 @@
       dashboardSection.hidden = session.role !== 'DOCTOR';
       adminSection.hidden = session.role !== 'SUPERADMIN';
       logoutButton.hidden = false;
+      appShell.hidden = false;
+      const isSuperadmin = session.role === 'SUPERADMIN';
+      adminNavLink.hidden = !isSuperadmin;
+      adminNavCreate.hidden = !isSuperadmin;
       const brand = session.role === 'DOCTOR'
         ? `${session.doctorName || 'Doctor'} | ${session.clinicName || 'Clinic'}`
         : 'DoctorBot | Superadmin';
       document.querySelector('#brand').textContent = brand;
+      if (brandMobile) brandMobile.textContent = isSuperadmin ? 'DoctorBot Admin' : (session.clinicName || 'DoctorBot');
       document.title = `${brand} Dashboard`;
       if (session.role === 'DOCTOR') {
         loadDoctorSettings().then((settings) => {
@@ -296,7 +516,9 @@
     }
 
     function showBanner(message, variant) {
-      notice.className = `alert alert-${variant}`;
+      notice.className = variant === 'success'
+        ? 'mb-6 rounded-xl border px-4 py-3 text-sm font-semibold bg-emerald-50 border-emerald-200 text-emerald-800'
+        : 'mb-6 rounded-xl border px-4 py-3 text-sm font-semibold bg-rose-50 border-rose-200 text-rose-800';
       notice.textContent = message;
       notice.hidden = false;
     }
@@ -311,14 +533,17 @@
         dashboardSection.hidden = true;
         adminSection.hidden = true;
         logoutButton.hidden = true;
+        appShell.hidden = true;
         return;
       }
       if (!response.ok) throw new Error('Could not load appointments. Please try again.');
 
       const data = await response.json();
       dateInput.value = data.date;
-      count.textContent = `${data.appointments.length} appointment${data.appointments.length === 1 ? '' : 's'}`;
+      count.textContent = `${data.appointments.length} appointment${data.appointments.length === 1 ? '' : 's'} on ${data.date}`;
       emptyState.hidden = data.appointments.length > 0;
+      if (statToday) statToday.textContent = String(data.appointments.length);
+      if (statTodayLabel) statTodayLabel.textContent = `booked on ${data.date}`;
       const slotStartFormatter = new Intl.DateTimeFormat(undefined, {
         dateStyle: 'medium',
         timeStyle: 'short',
@@ -339,7 +564,9 @@
         values.forEach((value, index) => {
           const cell = document.createElement('td');
           cell.textContent = value || '';
-          if (index === 2) cell.className = 'symptoms';
+          if (index === 2) cell.className = 'symptoms text-ink-soft';
+          if (index === 0) cell.className = 'font-semibold text-slate-900';
+          if (index === 3) cell.className = 'whitespace-nowrap font-medium text-slate-700';
           row.append(cell);
         });
         rows.append(row);
@@ -445,6 +672,7 @@
       document.querySelector('#calendar-connection-status').textContent = connected
         ? `Connected to ${settings.googleCalendarId || 'primary'}`
         : 'Not connected';
+      if (statCalendar) statCalendar.textContent = connected ? 'Connected' : 'Not connected';
       document.querySelector('#connect-calendar').textContent = connected
         ? 'Reconnect Google Calendar'
         : 'Connect Google Calendar';
@@ -469,7 +697,9 @@
       });
       if (announce || status.verificationCode) {
         const result = document.querySelector('#calendar-test-result');
-        result.className = status.verified ? 'text-success mb-0 mt-2' : 'text-danger mb-0 mt-2';
+        result.className = status.verified
+          ? 'mt-3 text-sm font-semibold text-emerald-700'
+          : 'mt-3 text-sm font-semibold text-rose-700';
         result.textContent = status.verified
           ? 'Connection verified: Google Calendar is reachable and appointment slots can be booked.'
           : (status.verificationMessage || 'Calendar connection could not be verified.');
@@ -563,22 +793,29 @@
       const total = Math.floor((end * 60 - start * 60) / duration);
       summary.textContent = `Patients can book ${total} slot${total === 1 ? '' : 's'} per open day `
         + `(${hourLabel(start)} to ${hourLabel(end)}), up to ${lookahead} day${lookahead === 1 ? '' : 's'} ahead.`;
+      if (statHours) {
+        statHours.textContent = `${hourLabel(start)} – ${hourLabel(end)}`;
+      }
     }
 
     function renderOffDays() {
       offDayList.replaceChildren();
       for (const offDay of configuredOffDays) {
         const item = document.createElement('li');
+        item.className = 'flex items-center gap-2';
         const removeButton = document.createElement('button');
         removeButton.type = 'button';
-        removeButton.className = 'btn btn-sm btn-outline-secondary me-2';
+        removeButton.className = 'btn btn-ghost btn-sm';
         removeButton.textContent = 'Remove';
         removeButton.setAttribute('aria-label', `Remove off-day ${offDay}`);
         removeButton.addEventListener('click', () => {
           configuredOffDays = configuredOffDays.filter((date) => date !== offDay);
           renderOffDays();
         });
-        item.append(removeButton, document.createTextNode(offDay));
+        const chip = document.createElement('span');
+        chip.className = 'chip chip-teal';
+        chip.textContent = offDay;
+        item.append(chip, removeButton);
         offDayList.append(item);
       }
     }
@@ -587,9 +824,9 @@
       religiousHolidayList.replaceChildren();
       for (const holiday of holidays) {
         const label = document.createElement('label');
-        label.className = 'form-check';
+        label.className = 'flex items-start gap-2.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 cursor-pointer hover:border-brand-300 transition-colors has-[:checked]:border-brand-500 has-[:checked]:bg-brand-50';
         const checkbox = document.createElement('input');
-        checkbox.className = 'form-check-input religious-holiday-open';
+        checkbox.className = 'form-check-input religious-holiday-open mt-0.5';
         checkbox.type = 'checkbox';
         checkbox.value = holiday.date;
         checkbox.checked = configuredHolidayOpenDays.includes(holiday.date);
@@ -610,11 +847,11 @@
 
     function appendFacilityPricingRow(pricing = { name: '', price: '' }) {
       const row = document.createElement('div');
-      row.className = 'row g-2 align-items-center pricing-row';
+      row.className = 'grid grid-cols-12 gap-3 px-4 py-3 items-center hover:bg-slate-50/70 transition-colors';
       const nameColumn = document.createElement('div');
-      nameColumn.className = 'col-md-6';
+      nameColumn.className = 'col-span-12 sm:col-span-5';
       const nameInput = document.createElement('input');
-      nameInput.className = 'form-control';
+      nameInput.className = 'field';
       nameInput.type = 'text';
       nameInput.maxLength = 100;
       nameInput.required = true;
@@ -625,9 +862,9 @@
       nameColumn.append(nameInput);
 
       const categoryColumn = document.createElement('div');
-      categoryColumn.className = 'col-md-3';
+      categoryColumn.className = 'col-span-7 sm:col-span-3';
       const categoryInput = document.createElement('select');
-      categoryInput.className = 'form-select';
+      categoryInput.className = 'field';
       categoryInput.setAttribute('aria-label', 'Priced item category');
       categoryInput.dataset.pricingCategory = '';
       for (const [value, label] of [['facility', 'Facility'], ['service', 'Treatment or service']]) {
@@ -640,9 +877,9 @@
       categoryColumn.append(categoryInput);
 
       const priceColumn = document.createElement('div');
-      priceColumn.className = 'col-md-3';
+      priceColumn.className = 'col-span-5 sm:col-span-3';
       const priceInput = document.createElement('input');
-      priceInput.className = 'form-control';
+      priceInput.className = 'field';
       priceInput.type = 'number';
       priceInput.min = '0';
       priceInput.max = '10000000';
@@ -655,9 +892,9 @@
       priceColumn.append(priceInput);
 
       const removeColumn = document.createElement('div');
-      removeColumn.className = 'col-md-2';
+      removeColumn.className = 'col-span-7 sm:col-span-1 flex justify-end';
       const removeButton = document.createElement('button');
-      removeButton.className = 'btn btn-outline-danger';
+      removeButton.className = 'btn btn-danger-ghost btn-sm';
       removeButton.type = 'button';
       removeButton.textContent = 'Remove';
       removeButton.setAttribute('aria-label', 'Remove priced item');
@@ -682,6 +919,12 @@
         error: 'Could not start WhatsApp. Try again.'
       };
       whatsappStatus.textContent = labels[state.status] || 'Not connected';
+      if (statWhatsapp) {
+        statWhatsapp.textContent = {
+          connected: 'Connected', qr: 'Awaiting scan', starting: 'Connecting',
+          reconnecting: 'Reconnecting', loggedOut: 'Logged out', error: 'Error', disconnected: 'Not connected'
+        }[state.status] || 'Not connected';
+      }
       const sessionNotice = document.querySelector('#whatsapp-session-notice');
       sessionNotice.hidden = state.sessionPersistent !== false || !state.sessionNotice;
       sessionNotice.textContent = state.sessionNotice || '';
@@ -718,16 +961,41 @@
           cell.textContent = String(value);
           row.append(cell);
         }
+        const statusCell = row.lastElementChild;
+        if (statusCell) {
+          statusCell.innerHTML = '';
+          const chip = document.createElement('span');
+          const active = doctor.isActive;
+          chip.className = active ? 'chip chip-teal' : 'chip !bg-rose-50 !text-rose-700 !border-rose-200';
+          chip.textContent = active ? 'Active' : 'Inactive';
+          statusCell.append(chip);
+        }
+        const setupCell = row.children[5];
+        if (setupCell) {
+          setupCell.textContent = '';
+          const chip = document.createElement('span');
+          chip.className = doctor.setupComplete ? 'chip chip-teal' : 'chip chip-amber';
+          chip.textContent = doctor.setupComplete ? 'Complete' : 'Pending';
+          setupCell.append(chip);
+        }
+        const calendarCell = row.children[6];
+        if (calendarCell) {
+          calendarCell.textContent = '';
+          const chip = document.createElement('span');
+          chip.className = doctor.googleCalendarConnected ? 'chip chip-teal' : 'chip !bg-slate-100 !text-slate-600 !border-slate-200';
+          chip.textContent = doctor.googleCalendarConnected ? 'Connected' : 'Not connected';
+          calendarCell.append(chip);
+        }
         const actionCell = document.createElement('td');
         const edit = document.createElement('button');
         edit.type = 'button';
-        edit.className = 'btn btn-outline-primary btn-sm me-2';
+        edit.className = 'btn btn-outline btn-sm';
         edit.textContent = 'Edit';
         edit.addEventListener('click', () => editDoctorProfile(doctor.doctorId));
         actionCell.append(edit);
         const toggle = document.createElement('button');
         toggle.type = 'button';
-        toggle.className = doctor.isActive ? 'btn btn-outline-danger btn-sm' : 'btn btn-outline-success btn-sm';
+        toggle.className = doctor.isActive ? 'btn btn-danger-ghost btn-sm !ml-2' : 'btn btn-outline btn-sm !ml-2';
         toggle.textContent = doctor.isActive ? 'Deactivate' : 'Activate';
         toggle.addEventListener('click', async () => {
           try {
@@ -870,7 +1138,9 @@
         }
         const result = await response.json();
         const testResult = document.querySelector('#calendar-test-result');
-        testResult.className = result.verified ? 'text-success mb-0 mt-2' : 'text-danger mb-0 mt-2';
+        testResult.className = result.verified
+          ? 'mt-3 text-sm font-semibold text-emerald-700'
+          : 'mt-3 text-sm font-semibold text-rose-700';
         testResult.textContent = result.verified
           ? `Calendar "${result.googleCalendarId}" verified. Appointments can be booked.`
           : (result.verificationMessage || 'Calendar could not be verified.');
@@ -961,6 +1231,7 @@
       dashboardSection.hidden = true;
       adminSection.hidden = true;
       logoutButton.hidden = true;
+      appShell.hidden = true;
       loginSection.hidden = false;
     });
 
