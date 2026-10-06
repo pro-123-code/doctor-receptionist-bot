@@ -1,0 +1,56 @@
+name: CI and Render deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# One deploy at a time; never cancel a deploy that is already rolling out.
+concurrency:
+  group: render-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Test suite
+        run: npm test
+
+  deploy:
+    name: Deploy to Render
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      # Render's own GitHub integration builds on push, but that can be disabled,
+      # paused by the free-tier monthly build limit, or broken by a stale webhook.
+      # A deploy hook keeps automatic deploys working independently of that.
+      - name: Trigger Render deploy hook
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "::warning::RENDER_DEPLOY_HOOK_URL secret is not configured. Add it in Settings > Secrets and variables > Actions to enable automatic deploys."
+            exit 0
+          fi
+          echo "Requesting Render deploy for $GITHUB_SHA ..."
+          curl --fail --silent --show-error --location --request POST "$RENDER_DEPLOY_HOOK_URL"
+          echo "Render deploy requested successfully."
