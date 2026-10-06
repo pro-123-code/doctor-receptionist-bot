@@ -163,6 +163,19 @@ function getGoogleCalendarConfigurationError(environment = process.env) {
   return null;
 }
 
+// Behind a TLS-terminating proxy (Render, Cloudflare, nginx) the app receives a
+// plain HTTP hop, so request.protocol reports "http" even though the browser used
+// HTTPS. X-Forwarded-Proto is authoritative in that setup, so it must win over
+// request.protocol or Google will reject an http:// redirect URI.
+function getRequestProtocol(request) {
+  const forwardedProto = String(request?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  if (forwardedProto === 'https' || forwardedProto === 'http') return forwardedProto;
+  if (request?.secure === true || request?.socket?.encrypted === true) return 'https';
+  const expressProtocol = String(request?.protocol || '').toLowerCase();
+  if (expressProtocol === 'https' || expressProtocol === 'http') return expressProtocol;
+  return 'http';
+}
+
 // The redirect URI sent to Google must be byte-identical in the auth request, the
 // token exchange, and the Google Cloud Console "Authorized redirect URIs" list.
 // GOOGLE_REDIRECT_URI wins when configured; otherwise the exact URI is derived from
@@ -174,8 +187,7 @@ function resolveGoogleRedirectUri(request, environment = process.env) {
   }
 
   const host = request?.get?.('host') || request?.headers?.host || '';
-  const forwardedProto = String(request?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim();
-  const protocol = (request?.protocol || forwardedProto || 'http').trim();
+  const protocol = getRequestProtocol(request);
   if (!host || !/^[^\s/@]+$/.test(host)) {
     return { redirectUri: null, error: 'Set GOOGLE_REDIRECT_URI to this server\u2019s public /api/auth/google/callback URL.' };
   }
@@ -194,8 +206,7 @@ function resolveGoogleRedirectUri(request, environment = process.env) {
 // Google OAuth consent screen requires.
 function resolvePublicBaseUrl(request) {
   const host = request?.get?.('host') || request?.headers?.host || '';
-  const forwardedProto = String(request?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim();
-  const protocol = (request?.protocol || forwardedProto || 'http').trim();
+  const protocol = getRequestProtocol(request);
   if (!host || !/^[^\s/@]+$/.test(host)) return '';
   return `${protocol}://${host}`;
 }

@@ -1957,3 +1957,43 @@ test('dashboard settings expose public legal page URLs', async () => {
     else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
   }
 });
+test('redirect URI stays https behind a TLS-terminating proxy such as Render', () => {
+  // Render forwards an internal plain-HTTP hop, so Express reports protocol "http"
+  // while the browser used HTTPS. X-Forwarded-Proto must win, otherwise an http://
+  // redirect URI is built and Google rejects the connection.
+  const proxied = resolveGoogleRedirectUri({
+    protocol: 'http',
+    secure: false,
+    headers: { host: 'doctor-receptionist-bot.onrender.com', 'x-forwarded-proto': 'https' }
+  }, {});
+  assert.deepEqual(proxied, {
+    redirectUri: 'https://doctor-receptionist-bot.onrender.com/api/auth/google/callback',
+    error: null
+  });
+
+  // Chained proxies send a comma separated list; the first hop is the client-facing one.
+  const chained = resolveGoogleRedirectUri({
+    protocol: 'http',
+    headers: { host: 'clinic.example', 'x-forwarded-proto': 'https, http' }
+  }, {});
+  assert.equal(chained.redirectUri, 'https://clinic.example/api/auth/google/callback');
+
+  // Express secure flag is used when no proxy header is present.
+  const secure = resolveGoogleRedirectUri({
+    protocol: 'http',
+    secure: true,
+    headers: { host: 'clinic.example' }
+  }, {});
+  assert.equal(secure.redirectUri, 'https://clinic.example/api/auth/google/callback');
+
+  // Plain localhost development still works over http.
+  const local = resolveGoogleRedirectUri({ protocol: 'http', headers: { host: 'localhost:3000' } }, {});
+  assert.equal(local.redirectUri, 'http://localhost:3000/api/auth/google/callback');
+
+  // An explicitly configured HTTPS value still wins over anything derived.
+  const explicit = resolveGoogleRedirectUri({
+    protocol: 'http',
+    headers: { host: 'ignored.example', 'x-forwarded-proto': 'http' }
+  }, { GOOGLE_REDIRECT_URI: 'https://clinic.example/api/auth/google/callback' });
+  assert.equal(explicit.redirectUri, 'https://clinic.example/api/auth/google/callback');
+});
