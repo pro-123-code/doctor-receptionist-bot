@@ -611,6 +611,12 @@
       configuredOffDays = [...(settings.offDays || [])];
       renderOffDays();
       configuredHolidayOpenDays = [...(settings.religiousHolidayOpenDays || [])];
+      // Overrides are religion-specific. Drop any that no longer belong to the
+      // selected religion so a stale entry cannot silently block saving.
+      const knownHolidayDates = new Set((settings.religiousHolidays || []).map((holiday) => holiday.date));
+      if (configuredHolidayOpenDays.length && knownHolidayDates.size) {
+        configuredHolidayOpenDays = configuredHolidayOpenDays.filter((date) => knownHolidayDates.has(date));
+      }
       renderReligiousHolidays(settings.religiousHolidays || []);
       clinicSetupComplete = settings.setupComplete === true;
       if (editingAdminDoctorId) {
@@ -1093,6 +1099,12 @@
           throw new Error(result.error || 'Could not save clinic setup.');
         }
         notice.hidden = true;
+        if (result.droppedHolidayOverrides > 0) {
+          showBanner(
+            `Saved. ${result.droppedHolidayOverrides} holiday override${result.droppedHolidayOverrides === 1 ? ' was' : 's were'} removed because ${result.droppedHolidayOverrides === 1 ? 'it is' : 'they are'} not a holiday for the selected religion.`,
+            'success'
+          );
+        }
         if (isAdminEdit) {
           editingAdminDoctorId = null;
           editingClinicSetup = false;

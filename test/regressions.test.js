@@ -2303,3 +2303,145 @@ test('doctor settings save and return clinic timings', async () => {
     else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
   }
 });
+test('changing religion drops stale holiday overrides instead of blocking the save', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'holiday-override-regression-secret-long';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalFindById = DashboardUser.findById;
+  const originalDoctorFindOne = Doctor.findOne;
+  const originalDoctorFindOneAndUpdate = Doctor.findOneAndUpdate;
+  const user = { _id: 'override-user', role: 'DOCTOR', doctorId: 'override-tenant', isActive: true };
+  const existingDoctor = {
+    doctorId: user.doctorId,
+    isActive: true,
+    // Left over from when this clinic was Muslim.
+    religiousHolidayOpenDays: ['2027-03-09', '2027-05-16']
+  };
+  let savedUpdate;
+  DashboardUser.findById = () => ({ lean: async () => user });
+  Doctor.findOne = () => ({ lean: async () => existingDoctor });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    savedUpdate = update;
+    return { lean: async () => ({ ...existingDoctor, ...update.$set }) };
+  };
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
+    const token = createSessionToken(user, secret, Date.now() + 60_000);
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` },
+      query: {},
+      body: {
+        doctorName: 'Dr. Override',
+        clinicName: 'Override Clinic',
+        basicCheckupFee: 450,
+        facilityPricing: [{ category: 'facility', name: 'OPD', price: 450 }],
+        consultationDetails: 'Walk-ins welcome.',
+        workingDays: [1, 2, 3, 4, 5],
+        offDays: ['2026-10-07'],
+        religion: 'Christian',
+        religiousHolidayOpenDays: ['2027-03-09', '2027-05-16'],
+        welcomeMessage: 'Welcome.'
+      }
+    };
+    const response = {
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    };
+    const [settingsAuth, settingsHandler] = routes.get('PUT /api/dashboard/settings');
+    await settingsAuth(request, response, () => {});
+    await settingsHandler(request, response);
+    assert.equal(response.statusCode, 200, 'stale Muslim overrides must not reject the save');
+    assert.deepEqual(savedUpdate.$set.religiousHolidayOpenDays, []);
+
+    // A genuine Christian override is kept.
+    request.body.religiousHolidayOpenDays = ['2026-12-25'];
+    response.statusCode = 200;
+    await settingsAuth(request, response, () => {});
+    await settingsHandler(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(savedUpdate.$set.religiousHolidayOpenDays, ['2026-12-25']);
+  } finally {
+    DashboardUser.findById = originalFindById;
+    Doctor.findOne = originalDoctorFindOne;
+    Doctor.findOneAndUpdate = originalDoctorFindOneAndUpdate;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
+test('clinic setup reports which field is invalid', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'precise-error-dashboard-secret-long';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalFindById = DashboardUser.findById;
+  const originalDoctorFindOne = Doctor.findOne;
+  const user = { _id: 'error-user', role: 'DOCTOR', doctorId: 'error-tenant', isActive: true };
+  const doctor = { doctorId: user.doctorId, isActive: true, setupComplete: true };
+  DashboardUser.findById = () => ({ lean: async () => user });
+  Doctor.findOne = () => ({ lean: async () => doctor });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
+    const token = createSessionToken(user, secret, Date.now() + 60_000);
+    const base = {
+      doctorName: 'Dr. Error',
+      clinicName: 'Error Clinic',
+      basicCheckupFee: 450,
+      facilityPricing: [{ category: 'facility', name: 'OPD', price: 450 }],
+      consultationDetails: 'Walk-ins welcome.',
+      workingDays: [1, 2, 3, 4, 5],
+      offDays: [],
+      religion: 'Muslim',
+      welcomeMessage: 'Welcome.'
+    };
+    const send = async (body) => {
+      const request = { headers: { cookie: `doctorbot_dashboard=${token}` }, query: {}, body };
+      const response = {
+        locals: {}, statusCode: 200,
+        status(code) { this.statusCode = code; return this; },
+        json(value) { this.body = value; }
+      };
+      const [auth, handler] = routes.get('PUT /api/dashboard/settings');
+      await auth(request, response, () => {});
+      await handler(request, response);
+      return response;
+    };
+
+    assert.equal((await send({ ...base, workingDays: [] })).body.error, 'Select at least one working day.');
+    assert.equal((await send({ ...base, facilityPricing: [] })).body.error,
+      'Add at least one facility or treatment with a price.');
+    assert.equal((await send({ ...base, officeStartHour: 18, officeEndHour: 9 })).body.error,
+      'Check the clinic timings: closing time must be later than opening time, and bookings 1 to 30 days ahead.');
+    assert.equal((await send({ ...base, basicCheckupFee: -5 })).body.error,
+      'Enter the basic checkup fee as a rupee amount of 0 or more.');
+    assert.equal((await send({ ...base, consultationDetails: '   ' })).body.error,
+      'Enter consultation details of 2000 characters or fewer.');
+  } finally {
+    DashboardUser.findById = originalFindById;
+    Doctor.findOne = originalDoctorFindOne;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});

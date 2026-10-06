@@ -231,44 +231,68 @@ function normalizeDoctorSettings(body = {}) {
   const timingPatch = normalizeClinicTimingInput(body);
   const normalizedWorkingDays = normalizeWorkingDays(workingDays);
   const normalizedOffDays = normalizeOffDays(offDays);
-  const religiousHolidayOpenDays = normalizeOffDays(body.religiousHolidayOpenDays || []);
+  const requestedHolidayOpenDays = normalizeOffDays(body.religiousHolidayOpenDays || []);
   const normalizedPricing = normalizeFacilityPricing(facilityPricing);
-  const facilitiesList = normalizedPricing?.filter(({ category }) => category === 'facility').map(({ name }) => name);
-  const servicesList = normalizedPricing?.filter(({ category }) => category === 'service').map(({ name }) => name);
+
+  if (typeof doctorName !== 'string' || !doctorName.trim() || doctorName.length > 120) {
+    return { error: 'Enter a doctor name of 120 characters or fewer.' };
+  }
+  if (typeof clinicName !== 'string' || !clinicName.trim() || clinicName.length > 160) {
+    return { error: 'Enter a clinic name of 160 characters or fewer.' };
+  }
+  if (!normalizedPricing || !normalizedPricing.length) {
+    return { error: 'Add at least one facility or treatment with a price.' };
+  }
+  if (!normalizedWorkingDays) return { error: 'Select at least one working day.' };
+  if (!normalizedOffDays) return { error: 'One or more clinic off-days is not a valid date.' };
+  if (!requestedHolidayOpenDays) return { error: 'One or more religious holiday dates is not valid.' };
+  if (!timingPatch) return { error: 'Check the clinic timings: closing time must be later than opening time, and bookings 1 to 30 days ahead.' };
+  if (!isValidRupeeAmount(basicCheckupFee)) return { error: 'Enter the basic checkup fee as a rupee amount of 0 or more.' };
+  if (typeof consultationDetails !== 'string' || !consultationDetails.trim() || consultationDetails.length > 2000) {
+    return { error: 'Enter consultation details of 2000 characters or fewer.' };
+  }
+  if (!['Christian', 'Muslim', 'Hindu', 'Other'].includes(religion)) {
+    return { error: 'Choose a religion so religious holidays can be calculated.' };
+  }
+  if (typeof welcomeMessage !== 'string' || welcomeMessage.length > 1000) {
+    return { error: 'Keep the welcome message to 1000 characters or fewer.' };
+  }
+
+  const facilitiesList = normalizedPricing.filter(({ category }) => category === 'facility').map(({ name }) => name);
+  const servicesList = normalizedPricing.filter(({ category }) => category === 'service').map(({ name }) => name);
+
+  // A holiday override only means something for the selected religion. When the
+  // religion changes, stale overrides are dropped rather than blocking the save,
+  // which previously locked a clinic out of saving entirely.
   const currentYear = getLocalDateParts(new Date(), 'Asia/Karachi').year;
   const holidayYears = new Set([currentYear, currentYear + 1,
-    ...(religiousHolidayOpenDays || []).map((date) => Number(date.slice(0, 4)))
+    ...requestedHolidayOpenDays.map((date) => Number(date.slice(0, 4)))
   ]);
   const knownHolidayDates = new Set([...holidayYears]
     .flatMap((year) => getReligiousHolidays(religion, year).map(({ date }) => date)));
-  const hasInvalidHolidayOverride = religiousHolidayOpenDays?.some((date) => !knownHolidayDates.has(date));
-
-  if (typeof doctorName !== 'string' || !doctorName.trim() || doctorName.length > 120 ||
-    typeof clinicName !== 'string' || !clinicName.trim() || clinicName.length > 160 ||
-    !normalizedPricing || !normalizedPricing.length ||
-    !normalizedWorkingDays || !normalizedOffDays || !religiousHolidayOpenDays || hasInvalidHolidayOverride ||
-    !timingPatch ||
-    !isValidRupeeAmount(basicCheckupFee) ||
-    typeof consultationDetails !== 'string' || !consultationDetails.trim() || consultationDetails.length > 2000 ||
-    !['Christian', 'Muslim', 'Hindu', 'Other'].includes(religion) ||
-    typeof welcomeMessage !== 'string' || welcomeMessage.length > 1000) return null;
+  const religiousHolidayOpenDays = requestedHolidayOpenDays.filter((date) => knownHolidayDates.has(date));
+  const droppedHolidayOverrides = requestedHolidayOpenDays.length - religiousHolidayOpenDays.length;
 
   return {
-    doctorName: doctorName.trim(),
-    clinicName: clinicName.trim(),
-    facilitiesList,
-    servicesList,
-    facilityPricing: normalizedPricing,
-    basicCheckupFee,
-    consultationDetails: consultationDetails.trim(),
-    workingDays: normalizedWorkingDays,
-    offDays: normalizedOffDays,
-    religiousHolidayOpenDays,
-    religion,
-    welcomeMessage: welcomeMessage.trim(),
-    ...timingPatch,
-    setupComplete: true,
-    updatedAt: new Date()
+    error: null,
+    droppedHolidayOverrides,
+    settings: {
+      doctorName: doctorName.trim(),
+      clinicName: clinicName.trim(),
+      facilitiesList,
+      servicesList,
+      facilityPricing: normalizedPricing,
+      basicCheckupFee,
+      consultationDetails: consultationDetails.trim(),
+      workingDays: normalizedWorkingDays,
+      offDays: normalizedOffDays,
+      religiousHolidayOpenDays,
+      religion,
+      welcomeMessage: welcomeMessage.trim(),
+      ...timingPatch,
+      setupComplete: true,
+      updatedAt: new Date()
+    }
   };
 }
 
@@ -357,8 +381,12 @@ function normalizeAdminDoctorPatch(body = {}, existingDoctor = {}) {
     workingDays: merged.workingDays,
     offDays: merged.offDays,
     religiousHolidayOpenDays: merged.religiousHolidayOpenDays || [],
-    welcomeMessage: merged.welcomeMessage || ''
-  }));
+    welcomeMessage: merged.welcomeMessage || '',
+    officeStartHour: merged.officeStartHour,
+    officeEndHour: merged.officeEndHour,
+    appointmentDurationMinutes: merged.appointmentDurationMinutes,
+    appointmentLookaheadDays: merged.appointmentLookaheadDays
+  }).error === null);
   return patch;
 }
 
@@ -790,10 +818,11 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
   app.put('/api/dashboard/settings', requireDashboardAuth, async (request, response) => {
     const doctor = response.locals.doctor;
     if (!doctor) return response.status(403).json({ error: 'Doctor access required' });
-    const normalizedSettings = normalizeDoctorSettings(request.body);
-    if (!normalizedSettings) {
-      return response.status(400).json({ error: 'Provide valid doctor and clinic details, working days, off-days, a basic checkup fee, and a price for every facility and service.' });
+    const normalized = normalizeDoctorSettings(request.body);
+    if (normalized.error) {
+      return response.status(400).json({ error: normalized.error });
     }
+    const normalizedSettings = normalized.settings;
 
     try {
       const updatedDoctor = await Doctor.findOneAndUpdate(
@@ -811,6 +840,8 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       }
       const oauthStatus = getGoogleCalendarOAuthStatus(request);
       response.json({
+        saved: true,
+        droppedHolidayOverrides: normalized.droppedHolidayOverrides,
         doctorId: updatedDoctor.doctorId,
         doctorName: updatedDoctor.doctorName,
         clinicName: updatedDoctor.clinicName,
