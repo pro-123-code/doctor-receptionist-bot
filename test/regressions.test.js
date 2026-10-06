@@ -9,8 +9,8 @@ const { getLocalDayBounds, parseRequestedDate } = require('../src/dateParser');
 const { getReligiousHoliday, isClinicOpenOnDate, normalizeOffDays, normalizeWorkingDays } = require('../src/clinicSchedule');
 const { enqueueInboundMessage, drainInboundQueue, getReceivedAt, messageRetentionMs } = require('../src/messageQueue');
 const { syncReligiousHolidayEvents } = require('../src/religiousCalendar');
-const { getVoiceFileExtension, translateVoiceMessageToEnglish } = require('../src/voiceTranscription');
-const { createGoogleOAuthState, createSessionToken, mountDashboard, verifyGoogleOAuthState, verifySessionToken } = require('../src/dashboard');
+const { convertWhatsAppAudioToWav, getVoiceFileExtension, isVoiceErrorRetryable, translateVoiceMessageToEnglish } = require('../src/voiceTranscription');
+const { createGoogleOAuthState, createSessionToken, getGoogleCalendarConfigurationError, mountDashboard, resolveGoogleRedirectUri, verifyGoogleOAuthState, verifySessionToken } = require('../src/dashboard');
 const { generateAppointmentsWorkbook } = require('../src/excelGenerator');
 const { getCalendarErrorDetails } = require('../src/calendarErrors');
 const { getWelcomeMessage } = require('../src/greetings');
@@ -100,6 +100,26 @@ test('religion-specific holidays automatically close a clinic schedule', () => {
   assert.equal(isClinicOpenOnDate({ year: 2026, month: 12, day: 25 }, {
     religion: 'Other', workingDays: allDays, offDays: []
   }), true);
+  assert.equal(isClinicOpenOnDate({ year: 2026, month: 3, day: 20 }, {
+    religion: 'Muslim', workingDays: [], offDays: [], religiousHolidayOpenDays: ['2026-03-20']
+  }), true);
+});
+
+test('religious holiday calendar omits a doctor-overridden open date', async () => {
+  const insertCalls = [];
+  const doctorProfile = {
+    doctorId: 'holiday-open-tenant', religion: 'Christian', clinicName: 'Clinic',
+    religiousHolidayOpenDays: ['2026-04-05'], religiousHolidayEvents: []
+  };
+  await syncReligiousHolidayEvents({
+    doctorProfile,
+    Doctor: { async updateOne() {} },
+    calendar: { events: { async insert(event) { insertCalls.push(event); }, async delete() {} } },
+    getReligiousHolidays: () => [{ date: '2026-04-05', name: 'Easter Sunday' }],
+    timeZone: 'Asia/Karachi',
+    now: new Date('2026-01-01T00:00:00Z')
+  });
+  assert.deepEqual(insertCalls, []);
 });
 
 test('religious holiday calendar sync adds all-day events and removes obsolete future dates', async () => {
@@ -286,11 +306,37 @@ test('Urdu voice translation uses the configured Whisper translation endpoint', 
     async (url, options) => {
       request = { url, options };
       return { ok: true, async json() { return { text: 'Please book an appointment tomorrow.' }; } };
-    }
+    },
+    async () => Buffer.from('normalized wav')
   );
   assert.equal(request.url, 'https://api.openai.com/v1/audio/translations');
   assert.equal(request.options.headers.Authorization, 'Bearer test-key');
+  assert.equal(request.options.body.get('file').type, 'audio/wav');
   assert.equal(transcript, 'Please book an appointment tomorrow.');
+});
+
+test('bundled FFmpeg converts in-memory voice media to mono 16 kHz WAV', async () => {
+  const sampleCount = 1600;
+  const sampleBytes = sampleCount * 2;
+  const wav = Buffer.alloc(44 + sampleBytes);
+  wav.write('RIFF', 0);
+  wav.writeUInt32LE(36 + sampleBytes, 4);
+  wav.write('WAVEfmt ', 8);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(8000, 24);
+  wav.writeUInt32LE(16000, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36);
+  wav.writeUInt32LE(sampleBytes, 40);
+
+  const converted = await convertWhatsAppAudioToWav(wav);
+  assert.equal(converted.toString('ascii', 0, 4), 'RIFF');
+  assert.equal(converted.toString('ascii', 8, 12), 'WAVE');
+  assert.equal(converted.readUInt16LE(22), 1);
+  assert.equal(converted.readUInt32LE(24), 16000);
 });
 
 test('Gemini extraction instructions require schema-only output', () => {
@@ -445,6 +491,28 @@ test('Google Calendar OAuth requires a valid credential encryption key', () => {
   assert.equal(hasValidEncryptionKey({ DOCTOR_CONFIG_ENCRYPTION_KEY: 'a'.repeat(64) }), true);
   assert.equal(hasValidEncryptionKey({ DOCTOR_CONFIG_ENCRYPTION_KEY: 'invalid' }), false);
   assert.equal(hasValidEncryptionKey({}), false);
+});
+
+test('Google OAuth redirect URI must exactly match the callback route', () => {
+  const config = {
+    GOOGLE_CLIENT_ID: 'client',
+    GOOGLE_CLIENT_SECRET: 'secret',
+    GOOGLE_REDIRECT_URI: 'https://clinic.example/api/auth/google/callback',
+    DOCTOR_CONFIG_ENCRYPTION_KEY: 'd'.repeat(64)
+  };
+  assert.equal(getGoogleCalendarConfigurationError(config), null);
+  assert.match(getGoogleCalendarConfigurationError({
+    ...config,
+    GOOGLE_REDIRECT_URI: 'https://clinic.example/api/auth/google/callback/'
+  }), /end exactly with \/api\/auth\/google\/callback/);
+  assert.match(getGoogleCalendarConfigurationError({
+    ...config,
+    GOOGLE_REDIRECT_URI: 'https://clinic.example/api/auth/google/callback?next=1'
+  }), /end exactly with \/api\/auth\/google\/callback/);
+  assert.equal(getGoogleCalendarConfigurationError({
+    ...config,
+    GOOGLE_REDIRECT_URI: 'http://localhost:3000/api/auth/google/callback'
+  }), null);
 });
 
 test('daily report cron remains scheduled when SMTP is not configured', () => {
@@ -746,13 +814,11 @@ test('clinic setup saves tenant schedule and gates WhatsApp pairing', async () =
       body: {
         doctorName: 'Dr. Test',
         clinicName: 'Tenant Clinic',
-        facilitiesList: ['OPD', 'Imaging'],
-        servicesList: ['Vaccination'],
         basicCheckupFee: 800,
         facilityPricing: [
-          { name: 'OPD', price: 800 },
-          { name: 'Imaging', price: 1500 },
-          { name: 'Vaccination', price: 500 }
+          { category: 'facility', name: 'OPD', price: 800 },
+          { category: 'facility', name: 'Imaging', price: 1500 },
+          { category: 'service', name: 'Vaccination', price: 500 }
         ],
         consultationDetails: 'Appointments required.',
         workingDays: [6, 1, 6],
@@ -781,15 +847,17 @@ test('clinic setup saves tenant schedule and gates WhatsApp pairing', async () =
     assert.equal(response.statusCode, 200);
     assert.equal(savedFilter.doctorId, user.doctorId);
     assert.equal(savedUpdate.$set.setupComplete, true);
+    assert.deepEqual(savedUpdate.$set.facilitiesList, ['OPD', 'Imaging']);
+    assert.deepEqual(savedUpdate.$set.servicesList, ['Vaccination']);
     assert.deepEqual(savedUpdate.$set.workingDays, [1, 6]);
     assert.deepEqual(savedUpdate.$set.offDays, ['2026-12-25']);
     assert.deepEqual(savedUpdate.$set.servicesList, ['Vaccination']);
     assert.equal(savedUpdate.$set.religion, 'Muslim');
     assert.equal(savedUpdate.$set.basicCheckupFee, 800);
     assert.deepEqual(savedUpdate.$set.facilityPricing, [
-      { name: 'OPD', price: 800 },
-      { name: 'Imaging', price: 1500 },
-      { name: 'Vaccination', price: 500 }
+      { category: 'facility', name: 'OPD', price: 800 },
+      { category: 'facility', name: 'Imaging', price: 1500 },
+      { category: 'service', name: 'Vaccination', price: 500 }
     ]);
 
     response = makeResponse();
@@ -811,6 +879,208 @@ test('clinic setup saves tenant schedule and gates WhatsApp pairing', async () =
     DashboardUser.findById = originalMethods.dashboardFindById;
     Doctor.findOne = originalMethods.doctorFindOne;
     Doctor.findOneAndUpdate = originalMethods.doctorFindOneAndUpdate;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
+test('superadmin can edit an incomplete tenant profile and login email', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'superadmin-profile-session-secret-long';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalMethods = {
+    dashboardFindById: DashboardUser.findById,
+    dashboardFindOne: DashboardUser.findOne,
+    dashboardUpdateMany: DashboardUser.updateMany,
+    doctorFindOne: Doctor.findOne,
+    doctorFindOneAndUpdate: Doctor.findOneAndUpdate
+  };
+  const admin = { _id: 'superadmin-profile-user', role: 'SUPERADMIN', doctorId: null, isActive: true };
+  const doctor = {
+    doctorId: 'incomplete-tenant', doctorName: 'Old Name', clinicName: 'Old Clinic',
+    email: 'old@example.test', facilitiesList: [], servicesList: [], facilityPricing: [],
+    setupComplete: false, isActive: false
+  };
+  let savedFilter;
+  let savedProfile;
+  let updatedLogin;
+  DashboardUser.findById = () => ({ lean: async () => admin });
+  DashboardUser.findOne = () => ({ lean: async () => null });
+  DashboardUser.updateMany = async (filter, update) => { updatedLogin = { filter, update }; };
+  Doctor.findOne = () => ({ lean: async () => doctor });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    savedFilter = filter;
+    savedProfile = update.$set;
+    return { lean: async () => ({ ...doctor, ...savedProfile }) };
+  };
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', 'bootstrap-clinic');
+    const token = createSessionToken(admin, secret, Date.now() + 60_000);
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` },
+      params: { doctorId: doctor.doctorId },
+      body: {
+        doctorName: 'New Doctor', clinicName: 'New Clinic', email: 'new@example.test',
+        religion: 'Christian', basicCheckupFee: 900,
+        facilityPricing: [
+          { category: 'facility', name: 'Lab', price: 500 },
+          { category: 'service', name: 'Vaccination', price: 700 }
+        ],
+        consultationDetails: 'Appointments required.', workingDays: [1, 2, 3, 4, 5],
+        offDays: [], religiousHolidayOpenDays: [], welcomeMessage: 'Welcome.'
+      }
+    };
+    const response = {
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    };
+    const [auth, superadmin, update] = routes.get('PUT /api/admin/doctors/:doctorId');
+    await auth(request, response, () => {});
+    superadmin(request, response, () => {});
+    await update(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(savedFilter.doctorId, doctor.doctorId);
+    assert.equal(savedProfile.setupComplete, true);
+    assert.deepEqual(savedProfile.facilitiesList, ['Lab']);
+    assert.deepEqual(savedProfile.servicesList, ['Vaccination']);
+    assert.equal(savedProfile.email, 'new@example.test');
+    assert.equal(updatedLogin.filter.doctorId, doctor.doctorId);
+    assert.equal(updatedLogin.update.$set.email, 'new@example.test');
+  } finally {
+    DashboardUser.findById = originalMethods.dashboardFindById;
+    DashboardUser.findOne = originalMethods.dashboardFindOne;
+    DashboardUser.updateMany = originalMethods.dashboardUpdateMany;
+    Doctor.findOne = originalMethods.doctorFindOne;
+    Doctor.findOneAndUpdate = originalMethods.doctorFindOneAndUpdate;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
+test('superadmin can provision without facilities and edit the complete tenant profile', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'superadmin-profile-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalMethods = {
+    dashboardFindById: DashboardUser.findById,
+    dashboardFindOne: DashboardUser.findOne,
+    dashboardCreate: DashboardUser.create,
+    dashboardUpdateMany: DashboardUser.updateMany,
+    doctorFindOne: Doctor.findOne,
+    doctorFindOneAndUpdate: Doctor.findOneAndUpdate,
+    doctorCreate: Doctor.create
+  };
+  const admin = { _id: 'root-admin', role: 'SUPERADMIN', doctorId: null, isActive: true };
+  let doctor = null;
+  let createdDoctorInput;
+  let doctorFilter;
+  let doctorUpdate;
+  let loginEmailUpdate;
+  DashboardUser.findById = () => ({ lean: async () => admin });
+  DashboardUser.findOne = () => ({ lean: async () => null });
+  DashboardUser.create = async (input) => ({ _id: 'new-login', ...input });
+  DashboardUser.updateMany = async (filter, update) => { loginEmailUpdate = { filter, update }; };
+  Doctor.create = async (input) => {
+    createdDoctorInput = input;
+    doctor = { ...input, facilitiesList: [], servicesList: [], facilityPricing: [], setupComplete: false };
+    return doctor;
+  };
+  Doctor.findOne = () => ({ lean: async () => doctor });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    doctorFilter = filter;
+    doctorUpdate = update;
+    doctor = { ...doctor, ...update.$set };
+    return { lean: async () => doctor };
+  };
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', 'bootstrap-clinic');
+    const token = createSessionToken(admin, secret, Date.now() + 60_000);
+    const request = { headers: { cookie: `doctorbot_dashboard=${token}` }, body: {} };
+    const response = {
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    };
+
+    request.body = {
+      doctorName: 'Dr. Admin Managed',
+      clinicName: 'Managed Clinic',
+      email: 'managed@example.test',
+      password: 'secure-temporary-password',
+      welcomeMessage: ''
+    };
+    const [createAuth, createSuperadmin, createHandler] = routes.get('POST /api/admin/doctors');
+    await createAuth(request, response, () => {});
+    createSuperadmin(request, response, () => {});
+    await createHandler(request, response);
+    assert.equal(response.statusCode, 201);
+    assert.equal(Object.hasOwn(createdDoctorInput, 'facilitiesList'), false);
+    assert.equal(Object.hasOwn(createdDoctorInput, 'setupComplete'), false);
+
+    const profile = {
+      doctorName: 'Dr. Admin Managed',
+      clinicName: 'Managed Clinic',
+      email: 'updated@example.test',
+      religion: 'Christian',
+      facilitiesList: [],
+      servicesList: [],
+      basicCheckupFee: 900,
+      facilityPricing: [
+        { category: 'facility', name: 'Imaging', price: 1500 },
+        { category: 'service', name: 'Vaccination', price: 500 }
+      ],
+      consultationDetails: 'Walk-ins welcome.',
+      workingDays: [1, 2, 3, 4, 5],
+      offDays: [],
+      religiousHolidayOpenDays: [],
+      welcomeMessage: 'Welcome.'
+    };
+    request.params = { doctorId: doctor.doctorId };
+    request.body = profile;
+    response.statusCode = 200;
+    const [updateAuth, updateSuperadmin, updateHandler] = routes.get('PUT /api/admin/doctors/:doctorId');
+    await updateAuth(request, response, () => {});
+    updateSuperadmin(request, response, () => {});
+    await updateHandler(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(doctorFilter.doctorId, doctor.doctorId);
+    assert.equal(doctorUpdate.$set.setupComplete, true);
+    assert.deepEqual(doctorUpdate.$set.facilitiesList, ['Imaging']);
+    assert.deepEqual(doctorUpdate.$set.servicesList, ['Vaccination']);
+    assert.equal(doctorUpdate.$set.facilityPricing[0].price, 1500);
+    assert.deepEqual(loginEmailUpdate.filter, { doctorId: doctor.doctorId, role: 'DOCTOR' });
+    assert.equal(loginEmailUpdate.update.$set.email, 'updated@example.test');
+  } finally {
+    DashboardUser.findById = originalMethods.dashboardFindById;
+    DashboardUser.findOne = originalMethods.dashboardFindOne;
+    DashboardUser.create = originalMethods.dashboardCreate;
+    DashboardUser.updateMany = originalMethods.dashboardUpdateMany;
+    Doctor.findOne = originalMethods.doctorFindOne;
+    Doctor.findOneAndUpdate = originalMethods.doctorFindOneAndUpdate;
+    Doctor.create = originalMethods.doctorCreate;
     if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
     else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
   }
@@ -848,9 +1118,9 @@ test('first-message greetings are deterministic and include ordered facilities',
     consultationDetails: 'By appointment only.',
     basicCheckupFee: 800,
     facilityPricing: [
-      { name: 'Outpatient', price: 500 },
-      { name: 'Imaging', price: 1500 },
-      { name: 'Vaccination', price: 650 }
+      { category: 'facility', name: 'Outpatient', price: 500 },
+      { category: 'facility', name: 'Imaging', price: 1500 },
+      { category: 'service', name: 'Vaccination', price: 650 }
     ]
   };
   assert.match(getWelcomeMessage('Hi', doctor), /^Hello!/);
@@ -865,6 +1135,29 @@ test('first-message greetings are deterministic and include ordered facilities',
   assert.match(getWelcomeMessage('Hi', doctor), /Imaging: Rs\. 1,500/);
   assert.match(getWelcomeMessage('Hi', doctor), /Vaccination: Rs\. 650/);
   assert.doesNotMatch(getWelcomeMessage('Hi', doctor), /Dr\. Ahmad|City Care Clinic|General OPD/);
+});
+
+test('welcome message lists every facility and service exactly once', () => {
+  const doctor = {
+    doctorName: 'Dr. Example',
+    clinicName: 'Example Clinic',
+    welcomeMessage: '',
+    facilitiesList: ['Outpatient', 'Imaging'],
+    servicesList: ['Vaccination'],
+    consultationDetails: '',
+    basicCheckupFee: 800,
+    facilityPricing: [
+      { category: 'facility', name: 'Outpatient', price: 500 },
+      { category: 'facility', name: 'Imaging', price: 1500 },
+      { category: 'service', name: 'Vaccination', price: 650 }
+    ]
+  };
+  const message = getWelcomeMessage('Salam', doctor);
+  assert.equal(message.match(/Outpatient/g).length, 1);
+  assert.equal(message.match(/Imaging/g).length, 1);
+  assert.equal(message.match(/Vaccination/g).length, 1);
+  assert.equal(message.match(/sahuliyaat aur rates/g).length, 1);
+  assert.equal(message.match(/services\/treatments aur rates/g).length, 1);
 });
 
 test('dashboard passwords use salted scrypt hashes', async () => {
@@ -1063,9 +1356,9 @@ test('facility pricing validates unique rate rows and formats Pakistani rupees',
     { name: 'Injection', price: 0.29 }
   ]);
   assert.deepEqual(rates, [
-    { name: 'Blood Test', price: 500 },
-    { name: 'Ultrasound', price: 1500.5 },
-    { name: 'Injection', price: 0.29 }
+    { category: 'facility', name: 'Blood Test', price: 500 },
+    { category: 'facility', name: 'Ultrasound', price: 1500.5 },
+    { category: 'facility', name: 'Injection', price: 0.29 }
   ]);
   assert.equal(getFacilityPrice({ facilityPricing: rates }, 'blood test'), 'Rs. 500');
   assert.equal(formatRupees(1500.5), 'Rs. 1,500.5');
@@ -1073,4 +1366,298 @@ test('facility pricing validates unique rate rows and formats Pakistani rupees',
   assert.equal(normalizeFacilityPricing([{ name: 'Scan', price: -1 }]), null);
   assert.equal(normalizeFacilityPricing([{ name: 'Lab', price: 100 }, { name: ' lab ', price: 200 }]), null);
   assert.equal(normalizeFacilityPricing([{ name: 'Lab', price: null }]), null);
+});
+
+test('voice transcription falls back to the transcription endpoint when translation fails', async () => {
+  const endpoints = [];
+  const transcript = await translateVoiceMessageToEnglish(
+    Buffer.from('voice'),
+    'audio/ogg; codecs=opus',
+    { OPENAI_ALLOW_PHI_PROCESSING: 'true', OPENAI_API_KEY: 'test-key' },
+    async (url, options) => {
+      endpoints.push(url);
+      if (url.endsWith('/translations')) return { ok: false, status: 500, async json() { return {}; } };
+      return { ok: true, async json() { return { text: 'I need an appointment next Friday.' }; } };
+    },
+    async () => Buffer.from('normalized wav')
+  );
+  assert.deepEqual(endpoints, [
+    'https://api.openai.com/v1/audio/translations',
+    'https://api.openai.com/v1/audio/transcriptions'
+  ]);
+  assert.equal(transcript, 'I need an appointment next Friday.');
+});
+
+test('voice errors are classified so only transient failures retry', () => {
+  assert.equal(isVoiceErrorRetryable({ code: 'VOICE_TRANSCRIPTION_NOT_ENABLED' }), false);
+  assert.equal(isVoiceErrorRetryable({ code: 'VOICE_TRANSCRIPTION_NOT_CONFIGURED' }), false);
+  assert.equal(isVoiceErrorRetryable({ code: 'VOICE_TRANSCRIPT_EMPTY' }), false);
+  assert.equal(isVoiceErrorRetryable({ code: 'VOICE_CONVERSION_FAILED' }), false);
+  assert.equal(isVoiceErrorRetryable({ code: 'VOICE_PROVIDER_HTTP_400' }), false);
+  assert.equal(isVoiceErrorRetryable({ code: 'VOICE_PROVIDER_HTTP_429' }), true);
+  assert.equal(isVoiceErrorRetryable({ code: 'VOICE_PROVIDER_HTTP_503' }), true);
+  assert.equal(isVoiceErrorRetryable({ code: 'VOICE_PROVIDER_UNAVAILABLE' }), true);
+  assert.equal(isVoiceErrorRetryable({ code: 'VOICE_CONVERSION_TIMEOUT' }), true);
+  assert.equal(isVoiceErrorRetryable(new Error('unexpected')), true);
+});
+
+test('Google redirect URI resolves from config or the incoming request', () => {
+  const configured = resolveGoogleRedirectUri(
+    { headers: { host: 'ignored.example' } },
+    { GOOGLE_REDIRECT_URI: 'https://clinic.example/api/auth/google/callback' }
+  );
+  assert.deepEqual(configured, {
+    redirectUri: 'https://clinic.example/api/auth/google/callback',
+    error: null
+  });
+
+  const derived = resolveGoogleRedirectUri(
+    { protocol: 'https', headers: { host: 'clinic.example' } },
+    {}
+  );
+  assert.deepEqual(derived, {
+    redirectUri: 'https://clinic.example/api/auth/google/callback',
+    error: null
+  });
+
+  const local = resolveGoogleRedirectUri({ headers: { host: 'localhost:3000' } }, {});
+  assert.equal(local.redirectUri, 'http://localhost:3000/api/auth/google/callback');
+
+  const insecureLive = resolveGoogleRedirectUri({ headers: { host: 'clinic.example' } }, {});
+  assert.equal(insecureLive.redirectUri, null);
+  assert.match(insecureLive.error, /GOOGLE_REDIRECT_URI/);
+
+  const invalid = resolveGoogleRedirectUri(
+    { headers: { host: 'clinic.example' } },
+    { GOOGLE_REDIRECT_URI: 'https://clinic.example/wrong-path' }
+  );
+  assert.equal(invalid.redirectUri, null);
+  assert.match(invalid.error, /end exactly with \/api\/auth\/google\/callback/);
+});
+
+test('clinic setup accepts facility-only or service-only pricing', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'pricing-dashboard-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalMethods = {
+    dashboardFindById: DashboardUser.findById,
+    doctorFindOne: Doctor.findOne,
+    doctorFindOneAndUpdate: Doctor.findOneAndUpdate
+  };
+  const user = { _id: 'pricing-user', role: 'DOCTOR', doctorId: 'pricing-tenant', isActive: true };
+  let doctor = { doctorId: user.doctorId, isActive: true, setupComplete: false };
+  let savedUpdate;
+  DashboardUser.findById = () => ({ lean: async () => user });
+  Doctor.findOne = () => ({ lean: async () => doctor });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    savedUpdate = update;
+    doctor = { ...doctor, ...update.$set };
+    return { lean: async () => doctor };
+  };
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
+    const token = createSessionToken(user, secret, Date.now() + 60_000);
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` },
+      body: {
+        doctorName: 'Dr. Pricing',
+        clinicName: 'Pricing Clinic',
+        basicCheckupFee: 700,
+        facilityPricing: [
+          { category: 'facility', name: 'OPD', price: 700 },
+          { category: 'facility', name: 'Ultrasound', price: 1800 }
+        ],
+        consultationDetails: 'Appointments required.',
+        workingDays: [1, 2, 3, 4, 5],
+        offDays: [],
+        religion: 'Muslim',
+        welcomeMessage: ''
+      }
+    };
+    const response = {
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    };
+    const [settingsAuth, settingsHandler] = routes.get('PUT /api/dashboard/settings');
+    await settingsAuth(request, response, () => {});
+    await settingsHandler(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(savedUpdate.$set.setupComplete, true);
+    assert.deepEqual(savedUpdate.$set.facilitiesList, ['OPD', 'Ultrasound']);
+    assert.deepEqual(savedUpdate.$set.servicesList, []);
+  } finally {
+    DashboardUser.findById = originalMethods.dashboardFindById;
+    Doctor.findOne = originalMethods.doctorFindOne;
+    Doctor.findOneAndUpdate = originalMethods.doctorFindOneAndUpdate;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
+test('superadmin partial edits preserve untouched settings and recompute setup state', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'superadmin-partial-session-secret-long';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalMethods = {
+    dashboardFindById: DashboardUser.findById,
+    dashboardFindOne: DashboardUser.findOne,
+    dashboardUpdateMany: DashboardUser.updateMany,
+    doctorFindOne: Doctor.findOne,
+    doctorFindOneAndUpdate: Doctor.findOneAndUpdate
+  };
+  const admin = { _id: 'partial-admin', role: 'SUPERADMIN', doctorId: null, isActive: true };
+  const existingDoctor = {
+    doctorId: 'partial-tenant',
+    doctorName: 'Dr. Old',
+    clinicName: 'Old Clinic',
+    email: 'old@example.test',
+    facilitiesList: ['OPD'],
+    servicesList: ['Vaccination'],
+    facilityPricing: [
+      { category: 'facility', name: 'OPD', price: 800 },
+      { category: 'service', name: 'Vaccination', price: 650 }
+    ],
+    basicCheckupFee: 800,
+    consultationDetails: 'Appointments required.',
+    workingDays: [1, 2, 3, 4, 5],
+    offDays: ['2026-12-25'],
+    religiousHolidayOpenDays: [],
+    religion: 'Muslim',
+    welcomeMessage: 'Welcome.',
+    setupComplete: true,
+    isActive: true
+  };
+  let savedUpdate;
+  let loginEmailUpdate;
+  DashboardUser.findById = () => ({ lean: async () => admin });
+  DashboardUser.findOne = () => ({ lean: async () => null });
+  DashboardUser.updateMany = async (filter, update) => { loginEmailUpdate = { filter, update }; };
+  Doctor.findOne = () => ({ lean: async () => existingDoctor });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    savedUpdate = update;
+    return { lean: async () => ({ ...existingDoctor, ...update.$set }) };
+  };
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', 'bootstrap-clinic');
+    const token = createSessionToken(admin, secret, Date.now() + 60_000);
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` },
+      params: { doctorId: existingDoctor.doctorId },
+      body: { doctorName: 'Dr. Renamed', email: 'renamed@example.test' }
+    };
+    const response = {
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    };
+    const [auth, superadmin, update] = routes.get('PUT /api/admin/doctors/:doctorId');
+    await auth(request, response, () => {});
+    superadmin(request, response, () => {});
+    await update(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(savedUpdate.$set.doctorName, 'Dr. Renamed');
+    assert.equal(savedUpdate.$set.email, 'renamed@example.test');
+    assert.equal(Object.hasOwn(savedUpdate.$set, 'facilityPricing'), false);
+    assert.equal(Object.hasOwn(savedUpdate.$set, 'workingDays'), false);
+    assert.equal(savedUpdate.$set.setupComplete, true);
+    assert.equal(response.body.doctor.basicCheckupFee, 800);
+    assert.deepEqual(response.body.doctor.facilitiesList, ['OPD']);
+    assert.equal(loginEmailUpdate.update.$set.email, 'renamed@example.test');
+
+    // An incomplete tenant stays marked incomplete after a partial edit.
+    Doctor.findOne = () => ({ lean: async () => ({
+      doctorId: 'incomplete-tenant', doctorName: 'Dr. New', clinicName: 'New Clinic',
+      email: 'new@example.test', isActive: true, setupComplete: false
+    }) });
+    request.params = { doctorId: 'incomplete-tenant' };
+    request.body = { welcomeMessage: 'Assalam o Alaikum!' };
+    await auth(request, response, () => {});
+    await update(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(savedUpdate.$set.setupComplete, false);
+    assert.equal(savedUpdate.$set.welcomeMessage, 'Assalam o Alaikum!');
+  } finally {
+    DashboardUser.findById = originalMethods.dashboardFindById;
+    DashboardUser.findOne = originalMethods.dashboardFindOne;
+    DashboardUser.updateMany = originalMethods.dashboardUpdateMany;
+    Doctor.findOne = originalMethods.doctorFindOne;
+    Doctor.findOneAndUpdate = originalMethods.doctorFindOneAndUpdate;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
+test('doctor settings can preview religious holidays for an unsaved religion', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'holiday-preview-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalFindById = DashboardUser.findById;
+  const originalDoctorFindOne = Doctor.findOne;
+  const user = { _id: 'holiday-user', role: 'DOCTOR', doctorId: 'holiday-tenant', isActive: true };
+  DashboardUser.findById = () => ({ lean: async () => user });
+  Doctor.findOne = () => ({ lean: async () => ({
+    doctorId: user.doctorId, isActive: true, religion: 'Christian',
+    religiousHolidayOpenDays: ['2026-04-05']
+  }) });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
+    const token = createSessionToken(user, secret, Date.now() + 60_000);
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` },
+      query: { religion: 'Muslim' }
+    };
+    const response = {
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    };
+    const [settingsAuth, settingsHandler] = routes.get('GET /api/dashboard/settings');
+    await settingsAuth(request, response, () => {});
+    settingsHandler(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.religion, 'Christian');
+    assert.ok(response.body.religiousHolidays.length > 0);
+    assert.ok(response.body.religiousHolidays.every(({ name }) =>
+      /Eid al-Fitr|Eid al-Adha|End of Ramadan|Feast of the Sacrifice/i.test(name)));
+    assert.deepEqual(response.body.religiousHolidayOpenDays, ['2026-04-05']);
+  } finally {
+    DashboardUser.findById = originalFindById;
+    Doctor.findOne = originalDoctorFindOne;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
 });

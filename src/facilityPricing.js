@@ -11,6 +11,8 @@ function normalizeFacilityPricing(value) {
   const names = new Set();
   for (const item of value) {
     if (typeof item?.name !== 'string' || !item.name.trim() || item.name.trim().length > 100) return null;
+    const category = item.category || 'facility';
+    if (!['facility', 'service'].includes(category)) return null;
     const name = item.name.trim();
     const normalizedName = name.toLocaleLowerCase('en');
     if ((typeof item.price !== 'number' && typeof item.price !== 'string') ||
@@ -18,7 +20,7 @@ function normalizeFacilityPricing(value) {
     const price = typeof item.price === 'number' ? item.price : Number(item.price);
     if (names.has(normalizedName) || !isValidRupeeAmount(price)) return null;
     names.add(normalizedName);
-    normalized.push({ name, price });
+    normalized.push({ category, name, price });
   }
   return normalized;
 }

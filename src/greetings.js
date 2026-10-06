@@ -15,12 +15,15 @@ function getWelcomeMessage(message, doctorProfile) {
   const services = doctorProfile.servicesList || [];
   const consultationDetails = doctorProfile.consultationDetails?.trim();
   const basicCheckupFee = formatRupees(doctorProfile.basicCheckupFee);
+  const facilityLines = facilities.map((facility, index) =>
+    `${index + 1}. ${formatFacilityRate(doctorProfile, facility)}`);
+  const serviceLines = services.map((service, index) =>
+    `${index + 1}. ${formatFacilityRate(doctorProfile, service)}`);
   return `${greeting}! ${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein khush aamdeed!\n` +
     (welcomeMessage ? `${welcomeMessage}\n` : '') +
     `Basic checkup fee: ${basicCheckupFee || 'price ke liye rabta karein'}\n\n` +
-    `Hamari sahuliyaat aur rates:\n${facilities.map((facility, index) => `${index + 1}. ${formatFacilityRate(doctorProfile, facility)}`).join('\n')}\n\n` +
-    (services.length ? `Hamari services aur treatments:\n${services.map((service, index) => `${index + 1}. ${service}`).join('\n')}\n\n` : '') +
-    (services.length ? `Services ke rates:\n${services.map((service, index) => `${index + 1}. ${formatFacilityRate(doctorProfile, service)}`).join('\n')}\n\n` : '') +
+    (facilityLines.length ? `Hamari sahuliyaat aur rates:\n${facilityLines.join('\n')}\n\n` : '') +
+    (serviceLines.length ? `Hamari services/treatments aur rates:\n${serviceLines.join('\n')}\n\n` : '') +
     (consultationDetails ? `${consultationDetails}\n\n` : '') +
     'Meherbani karke apna naam batayein.';
 }

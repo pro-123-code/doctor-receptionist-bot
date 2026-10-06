@@ -21,10 +21,9 @@ const { decryptJson } = require('./secretBox');
 const { getReligiousHoliday, getReligiousHolidays, isClinicOpenOnDate } = require('./clinicSchedule');
 const { drainInboundQueue, enqueueInboundMessage, getMessageId, getReceivedAt } = require('./messageQueue');
 const { syncReligiousHolidayEvents } = require('./religiousCalendar');
-const { translateVoiceMessageToEnglish } = require('./voiceTranscription');
+const { isVoiceErrorRetryable, translateVoiceMessageToEnglish } = require('./voiceTranscription');
 
 const app = express();
-app.set('trust proxy', 1);
 const port = Number.parseInt(process.env.PORT || '3000', 10);
 app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
 const bookingLocks = new Map();
@@ -162,7 +161,8 @@ function syncDoctorReligiousHolidays(targetDoctorId) {
     if (!doctorProfile?.googleCalendarConnected) return;
 
     const currentYear = getLocalDateParts(new Date(), timeZone).year;
-    const syncKey = `${targetDoctorId}:${doctorProfile.religion}:${currentYear}`;
+    const openDaysKey = [...(doctorProfile.religiousHolidayOpenDays || [])].sort().join(',');
+    const syncKey = `${targetDoctorId}:${doctorProfile.religion}:${doctorProfile.googleCalendarId}:${currentYear}:${openDaysKey}`;
     if (completedHolidaySyncs.has(syncKey)) return;
     const calendar = getCalendarClient(doctorProfile);
     await syncReligiousHolidayEvents({
@@ -822,6 +822,26 @@ function isWhatsAppSocketReady(targetDoctorId, socket) {
     whatsappConnectionStates.get(targetDoctorId)?.status === 'connected';
 }
 
+const loggedVoiceIssueKeys = new Set();
+
+function getVoiceFailureReply(error) {
+  const code = String(error?.code || '');
+  if (code === 'VOICE_TRANSCRIPT_EMPTY') {
+    return 'Maazrat, aap ki voice message samajh nahi aayi. Meherbani karke dobara saaf awaaz mein bhejein ya apna paigham text mein likhein.';
+  }
+  if (code === 'VOICE_TRANSCRIPTION_NOT_ENABLED' || code === 'VOICE_TRANSCRIPTION_NOT_CONFIGURED') {
+    return 'Maazrat, is waqt voice messages ki sahulat dastiyab nahi hai. Meherbani karke apna paigham text mein likhein.';
+  }
+  return 'Maazrat, voice message sunne mein mushkil aa rahi hai. Meherbani karke apna paigham text mein bhejein.';
+}
+
+function logVoiceIssueOnce(error, targetDoctorId) {
+  const key = `${targetDoctorId}:${String(error?.code || 'VOICE_UNKNOWN')}`;
+  if (loggedVoiceIssueKeys.has(key)) return;
+  loggedVoiceIssueKeys.add(key);
+  logServiceError('WhatsApp voice transcription', error, [], targetDoctorId);
+}
+
 function startDoctorQueueProcessor(doctorProfile, socket) {
   const targetDoctorId = doctorProfile.doctorId;
   if (!isWhatsAppSocketReady(targetDoctorId, socket) || processingDoctorQueues.has(targetDoctorId)) return;
@@ -841,8 +861,16 @@ function startDoctorQueueProcessor(doctorProfile, socket) {
       async processMessage(message) {
         let incomingText;
         if (message.messageType === 'audio') {
-          if (!message.audioData?.length) throw Object.assign(new Error('WhatsApp voice media is unavailable'), { code: 'VOICE_MEDIA_UNAVAILABLE' });
-          incomingText = await translateVoiceMessageToEnglish(message.audioData, message.audioMimeType);
+          if (!message.audioData?.length) {
+            return 'Maazrat, aap ki voice message download nahi ho saki. Meherbani karke voice message dobara bhejein ya apna paigham text mein likhein.';
+          }
+          try {
+            incomingText = await translateVoiceMessageToEnglish(message.audioData, message.audioMimeType);
+          } catch (error) {
+            if (isVoiceErrorRetryable(error)) throw error;
+            logVoiceIssueOnce(error, targetDoctorId);
+            return getVoiceFailureReply(error);
+          }
         } else {
           incomingText = message.text;
         }
@@ -900,9 +928,16 @@ async function enqueueWhatsAppMessages(doctorProfile, socket, messages) {
           logger: { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this; } },
           reuploadRequest: socket.updateMediaMessage.bind(socket)
         });
-        if (Buffer.isBuffer(media) && media.length <= 24 * 1024 * 1024) audioData = media;
+        // Keep stored audio well under MongoDB's 16 MB document limit.
+        if (Buffer.isBuffer(media) && media.length > 0 && media.length <= 12 * 1024 * 1024) audioData = media;
       } catch (error) {
         logServiceError('WhatsApp voice download', error, [], doctorProfile.doctorId);
+      }
+      if (!audioData) {
+        await socket.sendMessage(senderJid, {
+          text: 'Maazrat, aap ki voice message download nahi ho saki. Meherbani karke voice message dobara bhejein ya apna paigham text mein likhein.'
+        }).catch((error) => logServiceError('WhatsApp voice fallback reply', error, [], doctorProfile.doctorId));
+        continue;
       }
     }
 
@@ -1091,6 +1126,10 @@ function startDoctorWorkerSynchronization() {
 async function startServer() {
     try {
         await connectDatabase(process.env.MONGODB_URI, clinicId, doctorId);
+
+        if (process.env.OPENAI_ALLOW_PHI_PROCESSING !== 'true' || !process.env.OPENAI_API_KEY) {
+            console.warn('WhatsApp voice notes are disabled: set OPENAI_API_KEY and OPENAI_ALLOW_PHI_PROCESSING=true to enable Urdu/English voice message transcription.');
+        }
 
         app.listen(port, () => {
             console.log(`Doctor receptionist health server listening on port ${port}`);

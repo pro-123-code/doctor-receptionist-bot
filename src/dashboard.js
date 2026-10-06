@@ -6,6 +6,7 @@ const { DashboardUser, Doctor, consumeDashboardLoginAttempt } = require('./model
 const { hashPassword, verifyPassword } = require('./passwords');
 const { encryptJson, hasValidEncryptionKey } = require('./secretBox');
 const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
+const { getReligiousHolidays } = require('./clinicSchedule');
 const { isValidRupeeAmount, normalizeFacilityPricing } = require('./facilityPricing');
 
 const cookieName = 'doctorbot_dashboard';
@@ -44,7 +45,6 @@ function getSessionClaims(token, secret) {
   const signature = token.slice(separator + 1);
   const expectedSignature = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
   if (!constantTimeEquals(signature, expectedSignature)) return null;
-
   try {
     const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (!claims.userId || !['SUPERADMIN', 'DOCTOR'].includes(claims.role) ||
@@ -130,18 +130,199 @@ function isValidDateKey(value) {
   return date.getUTCFullYear() === year && date.getUTCMonth() + 1 === month && date.getUTCDate() === day;
 }
 
-function normalizeFacilitiesList(value) {
-  if (!Array.isArray(value)) return null;
-  const facilities = value.map((facility) => String(facility).trim()).filter(Boolean);
-  if (facilities.length < 1 || facilities.length > 20 || facilities.some((facility) => facility.length > 100)) {
-    return null;
-  }
-  return [...new Set(facilities)];
+function formatClinicDateKey(dateParts) {
+  return `${dateParts.year}-${String(dateParts.month).padStart(2, '0')}-${String(dateParts.day).padStart(2, '0')}`;
 }
 
-function isGoogleCalendarOAuthAvailable() {
-  return Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET &&
-    process.env.GOOGLE_REDIRECT_URI && hasValidEncryptionKey());
+function validateGoogleRedirectUriValue(value) {
+  let redirectUri;
+  try {
+    redirectUri = new URL(value);
+  } catch {
+    return 'GOOGLE_REDIRECT_URI must be an absolute URL.';
+  }
+  const isLocalHttp = redirectUri.protocol === 'http:' &&
+    ['localhost', '127.0.0.1', '[::1]'].includes(redirectUri.hostname);
+  if ((redirectUri.protocol !== 'https:' && !isLocalHttp) ||
+    redirectUri.pathname !== '/api/auth/google/callback' || redirectUri.search || redirectUri.hash ||
+    redirectUri.username || redirectUri.password) {
+    return 'GOOGLE_REDIRECT_URI must use HTTPS and end exactly with /api/auth/google/callback (HTTP is allowed only on localhost).';
+  }
+  return null;
+}
+
+function getGoogleCalendarConfigurationError(environment = process.env) {
+  if (!environment.GOOGLE_CLIENT_ID) return 'GOOGLE_CLIENT_ID is missing.';
+  if (!environment.GOOGLE_CLIENT_SECRET) return 'GOOGLE_CLIENT_SECRET is missing.';
+  if (environment.GOOGLE_REDIRECT_URI) {
+    const redirectError = validateGoogleRedirectUriValue(environment.GOOGLE_REDIRECT_URI);
+    if (redirectError) return redirectError;
+  }
+  if (!hasValidEncryptionKey(environment)) return 'DOCTOR_CONFIG_ENCRYPTION_KEY must encode exactly 32 bytes.';
+  return null;
+}
+
+// The redirect URI sent to Google must be byte-identical in the auth request, the
+// token exchange, and the Google Cloud Console "Authorized redirect URIs" list.
+// GOOGLE_REDIRECT_URI wins when configured; otherwise the exact URI is derived from
+// the incoming request so local and live onboarding can never drift apart.
+function resolveGoogleRedirectUri(request, environment = process.env) {
+  if (environment.GOOGLE_REDIRECT_URI) {
+    const error = validateGoogleRedirectUriValue(environment.GOOGLE_REDIRECT_URI);
+    return { redirectUri: error ? null : environment.GOOGLE_REDIRECT_URI, error };
+  }
+
+  const host = request?.get?.('host') || request?.headers?.host || '';
+  const forwardedProto = String(request?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim();
+  const protocol = (request?.protocol || forwardedProto || 'http').trim();
+  if (!host || !/^[^\s/@]+$/.test(host)) {
+    return { redirectUri: null, error: 'Set GOOGLE_REDIRECT_URI to this server\u2019s public /api/auth/google/callback URL.' };
+  }
+  const derived = `${protocol}://${host}/api/auth/google/callback`;
+  const error = validateGoogleRedirectUriValue(derived);
+  if (error) {
+    return {
+      redirectUri: null,
+      error: `${error} Derived "${derived}" from this request; set GOOGLE_REDIRECT_URI to the public HTTPS callback URL and register the same value in Google Cloud Console.`
+    };
+  }
+  return { redirectUri: derived, error: null };
+}
+
+function getGoogleCalendarOAuthStatus(request, environment = process.env) {
+  const configurationError = getGoogleCalendarConfigurationError(environment);
+  const { redirectUri, error: redirectError } = resolveGoogleRedirectUri(request, environment);
+  const error = configurationError || redirectError;
+  return {
+    available: !error,
+    redirectUri,
+    error: error || null
+  };
+}
+
+function normalizeDoctorSettings(body = {}) {
+  const {
+    doctorName, clinicName, consultationDetails, workingDays, offDays, religion,
+    basicCheckupFee, facilityPricing, welcomeMessage
+  } = body;
+  const normalizedWorkingDays = normalizeWorkingDays(workingDays);
+  const normalizedOffDays = normalizeOffDays(offDays);
+  const religiousHolidayOpenDays = normalizeOffDays(body.religiousHolidayOpenDays || []);
+  const normalizedPricing = normalizeFacilityPricing(facilityPricing);
+  const facilitiesList = normalizedPricing?.filter(({ category }) => category === 'facility').map(({ name }) => name);
+  const servicesList = normalizedPricing?.filter(({ category }) => category === 'service').map(({ name }) => name);
+  const currentYear = getLocalDateParts(new Date(), 'Asia/Karachi').year;
+  const holidayYears = new Set([currentYear, currentYear + 1,
+    ...(religiousHolidayOpenDays || []).map((date) => Number(date.slice(0, 4)))
+  ]);
+  const knownHolidayDates = new Set([...holidayYears]
+    .flatMap((year) => getReligiousHolidays(religion, year).map(({ date }) => date)));
+  const hasInvalidHolidayOverride = religiousHolidayOpenDays?.some((date) => !knownHolidayDates.has(date));
+
+  if (typeof doctorName !== 'string' || !doctorName.trim() || doctorName.length > 120 ||
+    typeof clinicName !== 'string' || !clinicName.trim() || clinicName.length > 160 ||
+    !normalizedPricing || !normalizedPricing.length ||
+    !normalizedWorkingDays || !normalizedOffDays || !religiousHolidayOpenDays || hasInvalidHolidayOverride ||
+    !isValidRupeeAmount(basicCheckupFee) ||
+    typeof consultationDetails !== 'string' || !consultationDetails.trim() || consultationDetails.length > 2000 ||
+    !['Christian', 'Muslim', 'Hindu', 'Other'].includes(religion) ||
+    typeof welcomeMessage !== 'string' || welcomeMessage.length > 1000) return null;
+
+  return {
+    doctorName: doctorName.trim(),
+    clinicName: clinicName.trim(),
+    facilitiesList,
+    servicesList,
+    facilityPricing: normalizedPricing,
+    basicCheckupFee,
+    consultationDetails: consultationDetails.trim(),
+    workingDays: normalizedWorkingDays,
+    offDays: normalizedOffDays,
+    religiousHolidayOpenDays,
+    religion,
+    welcomeMessage: welcomeMessage.trim(),
+    setupComplete: true,
+    updatedAt: new Date()
+  };
+}
+
+// Superadmin edits may target any subset of a doctor's configuration, before or
+// after the doctor completes their own setup. Only provided fields are validated
+// and applied; setupComplete is recomputed from the merged profile so a tenant is
+// never half-configured without the record saying so.
+function normalizeAdminDoctorPatch(body = {}, existingDoctor = {}) {
+  const patch = {};
+
+  if (body.doctorName !== undefined) {
+    if (typeof body.doctorName !== 'string' || !body.doctorName.trim() || body.doctorName.length > 120) return null;
+    patch.doctorName = body.doctorName.trim();
+  }
+  if (body.clinicName !== undefined) {
+    if (typeof body.clinicName !== 'string' || !body.clinicName.trim() || body.clinicName.length > 160) return null;
+    patch.clinicName = body.clinicName.trim();
+  }
+  if (body.religion !== undefined) {
+    if (!['Christian', 'Muslim', 'Hindu', 'Other'].includes(body.religion)) return null;
+    patch.religion = body.religion;
+  }
+  if (body.basicCheckupFee !== undefined) {
+    if (!isValidRupeeAmount(body.basicCheckupFee)) return null;
+    patch.basicCheckupFee = body.basicCheckupFee;
+  }
+  if (body.facilityPricing !== undefined) {
+    const normalizedPricing = normalizeFacilityPricing(body.facilityPricing);
+    if (!normalizedPricing) return null;
+    patch.facilityPricing = normalizedPricing;
+    patch.facilitiesList = normalizedPricing.filter(({ category }) => category === 'facility').map(({ name }) => name);
+    patch.servicesList = normalizedPricing.filter(({ category }) => category === 'service').map(({ name }) => name);
+  }
+  if (body.consultationDetails !== undefined) {
+    if (typeof body.consultationDetails !== 'string' || body.consultationDetails.length > 2000) return null;
+    patch.consultationDetails = body.consultationDetails.trim();
+  }
+  if (body.workingDays !== undefined) {
+    const normalizedWorkingDays = normalizeWorkingDays(body.workingDays);
+    if (!normalizedWorkingDays) return null;
+    patch.workingDays = normalizedWorkingDays;
+  }
+  if (body.offDays !== undefined) {
+    const normalizedOffDays = normalizeOffDays(body.offDays);
+    if (!normalizedOffDays) return null;
+    patch.offDays = normalizedOffDays;
+  }
+  if (body.welcomeMessage !== undefined) {
+    if (typeof body.welcomeMessage !== 'string' || body.welcomeMessage.length > 1000) return null;
+    patch.welcomeMessage = body.welcomeMessage.trim();
+  }
+  if (body.religiousHolidayOpenDays !== undefined) {
+    const religiousHolidayOpenDays = normalizeOffDays(body.religiousHolidayOpenDays);
+    if (!religiousHolidayOpenDays) return null;
+    const mergedReligion = patch.religion || existingDoctor.religion || 'Other';
+    const currentYear = getLocalDateParts(new Date(), 'Asia/Karachi').year;
+    const holidayYears = new Set([currentYear, currentYear + 1,
+      ...religiousHolidayOpenDays.map((date) => Number(date.slice(0, 4)))
+    ]);
+    const knownHolidayDates = new Set([...holidayYears]
+      .flatMap((year) => getReligiousHolidays(mergedReligion, year).map(({ date }) => date)));
+    if (religiousHolidayOpenDays.some((date) => !knownHolidayDates.has(date))) return null;
+    patch.religiousHolidayOpenDays = religiousHolidayOpenDays;
+  }
+
+  patch.updatedAt = new Date();
+  const merged = { ...existingDoctor, ...patch };
+  patch.setupComplete = Boolean(normalizeDoctorSettings({
+    doctorName: merged.doctorName,
+    clinicName: merged.clinicName,
+    religion: merged.religion,
+    basicCheckupFee: merged.basicCheckupFee,
+    facilityPricing: merged.facilityPricing,
+    consultationDetails: merged.consultationDetails,
+    workingDays: merged.workingDays,
+    offDays: merged.offDays,
+    religiousHolidayOpenDays: merged.religiousHolidayOpenDays || [],
+    welcomeMessage: merged.welcomeMessage || ''
+  }));
+  return patch;
 }
 
 function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection = {}) {
@@ -205,14 +386,15 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     response.json({ authenticated: true });
   });
 
-  app.get('/api/auth/google', requireDashboardAuth, async (_request, response) => {
+  app.get('/api/auth/google', requireDashboardAuth, async (request, response) => {
     const user = response.locals.dashboardUser;
     const secret = getDashboardSecret();
     if (user.role !== 'DOCTOR' || !user.doctorId) {
       return response.status(403).json({ error: 'Doctor access required' });
     }
-    if (!secret || !isGoogleCalendarOAuthAvailable()) {
-      return response.status(503).json({ error: 'Google Calendar OAuth is not configured' });
+    const oauthStatus = getGoogleCalendarOAuthStatus(request);
+    if (!secret || !oauthStatus.available) {
+      return response.status(503).json({ error: oauthStatus.error || 'Dashboard session signing secret is not configured.' });
     }
 
     try {
@@ -232,7 +414,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       const oauthClient = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
-        process.env.GOOGLE_REDIRECT_URI
+        oauthStatus.redirectUri
       );
       response.redirect(oauthClient.generateAuthUrl({
         access_type: 'offline',
@@ -252,7 +434,16 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     if (user.role !== 'DOCTOR' || !user.doctorId) {
       return response.status(403).json({ error: 'Doctor access required' });
     }
+    const oauthStatus = getGoogleCalendarOAuthStatus(request);
+    if (request.query.error === 'redirect_uri_mismatch') {
+      return response.status(400).send(
+        `Google rejected the redirect URI. Register this exact value under Authorized redirect URIs in Google Cloud Console: ${oauthStatus.redirectUri || '(could not be derived — set GOOGLE_REDIRECT_URI)'}`
+      );
+    }
     if (request.query.error) return response.status(400).send('Google Calendar connection was cancelled.');
+    if (!oauthStatus.available) {
+      return response.status(503).send(`Google Calendar is not configured correctly: ${oauthStatus.error}`);
+    }
 
     const state = verifyGoogleOAuthState(request.query.state, getDashboardSecret());
     if (!state || state.userId !== String(user._id) || state.doctorId !== user.doctorId ||
@@ -278,7 +469,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       const oauthClient = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
-        process.env.GOOGLE_REDIRECT_URI
+        oauthStatus.redirectUri
       );
       const { tokens } = await oauthClient.getToken(request.query.code);
       let refreshToken = tokens.refresh_token;
@@ -331,7 +522,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       authenticated: true,
       role: user.role,
       doctorId: user.doctorId || null,
-      doctorName: response.locals.doctor?.name || null,
+      doctorName: response.locals.doctor?.doctorName || null,
       clinicName: response.locals.doctor?.clinicName || null
     });
   });
@@ -368,9 +559,15 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     }
   });
 
-  app.get('/api/dashboard/settings', requireDashboardAuth, (_request, response) => {
+  app.get('/api/dashboard/settings', requireDashboardAuth, (request, response) => {
     const doctor = response.locals.doctor;
     if (!doctor) return response.status(403).json({ error: 'Doctor access required' });
+    const previewReligion = ['Christian', 'Muslim', 'Hindu', 'Other'].includes(request.query?.religion)
+      ? request.query.religion
+      : doctor.religion || 'Other';
+    const currentDate = getLocalDateParts(new Date(), timeZone);
+    const currentDateKey = formatClinicDateKey(currentDate);
+    const oauthStatus = getGoogleCalendarOAuthStatus(request);
     response.json({
       doctorId: doctor.doctorId,
       doctorName: doctor.doctorName,
@@ -383,11 +580,17 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       consultationDetails: doctor.consultationDetails || '',
       workingDays: doctor.workingDays || [1, 2, 3, 4, 5],
       offDays: doctor.offDays || [],
+      religiousHolidayOpenDays: doctor.religiousHolidayOpenDays || [],
+      religiousHolidays: [...new Set([currentDate.year, currentDate.year + 1])]
+        .flatMap((year) => getReligiousHolidays(previewReligion, year))
+        .filter(({ date }) => date >= currentDateKey),
       setupComplete: doctor.setupComplete === true,
       religion: doctor.religion || 'Other',
       welcomeMessage: doctor.welcomeMessage,
       googleCalendarConnected: doctor.googleCalendarConnected,
-      calendarOAuthAvailable: isGoogleCalendarOAuthAvailable(),
+      calendarOAuthAvailable: oauthStatus.available,
+      calendarOAuthError: oauthStatus.error,
+      googleRedirectUri: oauthStatus.redirectUri,
       googleCalendarId: doctor.googleCalendarId
     });
   });
@@ -427,46 +630,15 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
   app.put('/api/dashboard/settings', requireDashboardAuth, async (request, response) => {
     const doctor = response.locals.doctor;
     if (!doctor) return response.status(403).json({ error: 'Doctor access required' });
-    const {
-      doctorName, clinicName, facilitiesList, servicesList, consultationDetails,
-      workingDays, offDays, religion, basicCheckupFee, facilityPricing, welcomeMessage
-    } = request.body || {};
-    const normalizedFacilities = normalizeFacilitiesList(facilitiesList);
-    const normalizedServices = normalizeFacilitiesList(servicesList);
-    const normalizedWorkingDays = normalizeWorkingDays(workingDays);
-    const normalizedOffDays = normalizeOffDays(offDays);
-    const normalizedPricing = normalizeFacilityPricing(facilityPricing);
-    const listedItems = [...(normalizedFacilities || []), ...(normalizedServices || [])];
-    const pricedNames = new Set((normalizedPricing || []).map(({ name }) => name.toLocaleLowerCase('en')));
-    if (typeof doctorName !== 'string' || !doctorName.trim() || doctorName.length > 120 ||
-      typeof clinicName !== 'string' || !clinicName.trim() || clinicName.length > 160 ||
-      !normalizedFacilities || !normalizedServices || !normalizedWorkingDays || !normalizedOffDays ||
-      !isValidRupeeAmount(basicCheckupFee) ||
-      !normalizedPricing || listedItems.some((name) => !pricedNames.has(name.toLocaleLowerCase('en'))) ||
-      typeof consultationDetails !== 'string' || !consultationDetails.trim() || consultationDetails.length > 2000 ||
-      !['Christian', 'Muslim', 'Hindu', 'Other'].includes(religion) ||
-      typeof welcomeMessage !== 'string' || welcomeMessage.length > 1000) {
+    const normalizedSettings = normalizeDoctorSettings(request.body);
+    if (!normalizedSettings) {
       return response.status(400).json({ error: 'Provide valid doctor and clinic details, working days, off-days, a basic checkup fee, and a price for every facility and service.' });
     }
 
     try {
       const updatedDoctor = await Doctor.findOneAndUpdate(
         { doctorId: doctor.doctorId, isActive: true },
-        { $set: {
-          doctorName: doctorName.trim(),
-          clinicName: clinicName.trim(),
-          facilitiesList: normalizedFacilities,
-          basicCheckupFee,
-          facilityPricing: normalizedPricing,
-          servicesList: normalizedServices,
-          consultationDetails: consultationDetails.trim(),
-          workingDays: normalizedWorkingDays,
-          offDays: normalizedOffDays,
-          religion,
-          setupComplete: true,
-          welcomeMessage: welcomeMessage.trim(),
-          updatedAt: new Date()
-        } },
+        { $set: normalizedSettings },
         { new: true, runValidators: true }
       ).lean();
       if (!updatedDoctor) return response.status(403).json({ error: 'Doctor account is inactive' });
@@ -477,6 +649,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
           console.error(`Religious holiday calendar sync failed (${error?.name || 'Error'})`);
         }
       }
+      const oauthStatus = getGoogleCalendarOAuthStatus(request);
       response.json({
         doctorId: updatedDoctor.doctorId,
         doctorName: updatedDoctor.doctorName,
@@ -492,7 +665,9 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         setupComplete: updatedDoctor.setupComplete,
         welcomeMessage: updatedDoctor.welcomeMessage,
         googleCalendarConnected: updatedDoctor.googleCalendarConnected,
-        calendarOAuthAvailable: isGoogleCalendarOAuthAvailable(),
+        calendarOAuthAvailable: oauthStatus.available,
+        calendarOAuthError: oauthStatus.error,
+        googleRedirectUri: oauthStatus.redirectUri,
         googleCalendarId: updatedDoctor.googleCalendarId
       });
     } catch (error) {
@@ -515,12 +690,16 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         ])
       ]);
       const countByDoctor = new Map(counts.map((entry) => [entry._id, entry]));
-      response.json({ doctors: doctors.map(({ doctorId, doctorName, clinicName, email, isActive, createdAt }) => ({
+      response.json({ doctors: doctors.map(({
+        doctorId, doctorName, clinicName, email, isActive, createdAt, setupComplete, googleCalendarConnected
+      }) => ({
         doctorId,
         doctorName,
         clinicName,
         email,
         isActive,
+        setupComplete: setupComplete === true,
+        googleCalendarConnected: googleCalendarConnected === true,
         createdAt,
         ...(countByDoctor.get(doctorId) || { totalAppointments: 0, upcomingAppointments: 0 })
       })) });
@@ -530,16 +709,114 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     }
   });
 
+  app.get('/api/admin/doctors/:doctorId', requireDashboardAuth, requireSuperadmin, async (request, response) => {
+    try {
+      const doctor = await Doctor.findOne({ doctorId: request.params.doctorId }).lean();
+      if (!doctor) return response.status(404).json({ error: 'Doctor not found' });
+      const previewReligion = ['Christian', 'Muslim', 'Hindu', 'Other'].includes(request.query?.religion)
+        ? request.query.religion
+        : doctor.religion || 'Other';
+      const currentDate = getLocalDateParts(new Date(), timeZone);
+      const currentDateKey = formatClinicDateKey(currentDate);
+      const oauthStatus = getGoogleCalendarOAuthStatus(request);
+      response.json({
+        doctorId: doctor.doctorId,
+        doctorName: doctor.doctorName,
+        clinicName: doctor.clinicName,
+        email: doctor.email,
+        facilitiesList: doctor.facilitiesList || [],
+        servicesList: doctor.servicesList || [],
+        facilityPricing: doctor.facilityPricing || [],
+        basicCheckupFee: doctor.basicCheckupFee ?? null,
+        consultationDetails: doctor.consultationDetails || '',
+        workingDays: doctor.workingDays || [1, 2, 3, 4, 5],
+        offDays: doctor.offDays || [],
+        religiousHolidayOpenDays: doctor.religiousHolidayOpenDays || [],
+        religiousHolidays: [...new Set([currentDate.year, currentDate.year + 1])]
+          .flatMap((year) => getReligiousHolidays(previewReligion, year))
+          .filter(({ date }) => date >= currentDateKey),
+        religion: doctor.religion || 'Other',
+        setupComplete: doctor.setupComplete === true,
+        welcomeMessage: doctor.welcomeMessage || '',
+        googleCalendarConnected: doctor.googleCalendarConnected === true,
+        calendarOAuthAvailable: oauthStatus.available,
+        calendarOAuthError: oauthStatus.error,
+        googleRedirectUri: oauthStatus.redirectUri,
+        googleCalendarId: doctor.googleCalendarId || 'primary',
+        isActive: doctor.isActive !== false
+      });
+    } catch (error) {
+      console.error(`Admin doctor profile read failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Doctor profile is temporarily unavailable' });
+    }
+  });
+
+  app.put('/api/admin/doctors/:doctorId', requireDashboardAuth, requireSuperadmin, async (request, response) => {
+    try {
+      const existingDoctor = await Doctor.findOne({ doctorId: request.params.doctorId }).lean();
+      if (!existingDoctor) return response.status(404).json({ error: 'Doctor not found' });
+
+      const patch = normalizeAdminDoctorPatch(request.body || {}, existingDoctor);
+      const emailProvided = request.body?.email !== undefined;
+      const email = emailProvided && typeof request.body.email === 'string'
+        ? request.body.email.trim().toLowerCase()
+        : '';
+      if (!patch || (emailProvided && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+        return response.status(400).json({ error: 'Provide valid doctor details. Every supplied field must pass validation.' });
+      }
+      if (emailProvided) {
+        const existingUser = await DashboardUser.findOne({ email }).lean();
+        if (existingUser && existingUser.doctorId !== request.params.doctorId) {
+          return response.status(409).json({ error: 'That email is already assigned to another account.' });
+        }
+        patch.email = email;
+      }
+
+      const updatedDoctor = await Doctor.findOneAndUpdate(
+        { doctorId: request.params.doctorId },
+        { $set: patch },
+        { new: true, runValidators: true }
+      ).lean();
+      if (!updatedDoctor) return response.status(404).json({ error: 'Doctor not found' });
+      if (emailProvided) {
+        await DashboardUser.updateMany({ doctorId: request.params.doctorId, role: 'DOCTOR' }, { $set: { email } });
+      }
+      if (typeof whatsappConnection.syncReligiousHolidays === 'function' && updatedDoctor.isActive) {
+        await whatsappConnection.syncReligiousHolidays(updatedDoctor.doctorId).catch(() => {});
+      }
+      response.json({ doctor: {
+        doctorId: updatedDoctor.doctorId,
+        doctorName: updatedDoctor.doctorName,
+        clinicName: updatedDoctor.clinicName,
+        email: updatedDoctor.email,
+        facilitiesList: updatedDoctor.facilitiesList,
+        servicesList: updatedDoctor.servicesList,
+        facilityPricing: updatedDoctor.facilityPricing,
+        basicCheckupFee: updatedDoctor.basicCheckupFee,
+        consultationDetails: updatedDoctor.consultationDetails,
+        workingDays: updatedDoctor.workingDays,
+        offDays: updatedDoctor.offDays,
+        religiousHolidayOpenDays: updatedDoctor.religiousHolidayOpenDays || [],
+        religion: updatedDoctor.religion,
+        setupComplete: updatedDoctor.setupComplete,
+        welcomeMessage: updatedDoctor.welcomeMessage
+      } });
+    } catch (error) {
+      if (error.code === 11000) return response.status(409).json({ error: 'Doctor email is already in use.' });
+      console.error(`Admin doctor profile update failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Doctor profile could not be saved' });
+    }
+  });
+
   app.post('/api/admin/doctors', requireDashboardAuth, requireSuperadmin, async (request, response) => {
-    const { doctorName, clinicName, email, password, facilitiesList, welcomeMessage } = request.body || {};
+    const { doctorName, clinicName, email, password, welcomeMessage } = request.body || {};
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
-    const normalizedFacilities = normalizeFacilitiesList(facilitiesList);
     if (typeof doctorName !== 'string' || !doctorName.trim() || doctorName.length > 120 ||
       typeof clinicName !== 'string' || !clinicName.trim() || clinicName.length > 160 ||
       !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) ||
       typeof password !== 'string' || password.length < 12 || password.length > 256 ||
-      !normalizedFacilities || typeof welcomeMessage !== 'string' || welcomeMessage.length > 1000) {
-      return response.status(400).json({ error: 'Provide doctor/clinic names, login details, 1-20 facilities, and a welcome message under 1000 characters.' });
+      typeof welcomeMessage !== 'string' || welcomeMessage.length > 1000) {
+      return response.status(400).json({ error: 'Provide doctor/clinic names and valid login details.' });
     }
 
     const baseSlug = clinicName.toLowerCase().normalize('NFKD')
@@ -552,7 +829,6 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         doctorName: doctorName.trim(),
         clinicName: clinicName.trim(),
         email: normalizedEmail,
-        facilitiesList: normalizedFacilities,
         welcomeMessage: welcomeMessage.trim(),
         googleCalendarId: 'primary',
         googleCalendarConnected: false,
@@ -570,8 +846,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
           doctorId: doctor.doctorId,
           doctorName: doctor.doctorName,
           clinicName: doctor.clinicName,
-          email: doctor.email,
-          facilitiesList: doctor.facilitiesList
+          email: doctor.email
         },
         userId: String(user._id)
       });
@@ -606,7 +881,11 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
 module.exports = {
   createGoogleOAuthState,
   createSessionToken,
+  getGoogleCalendarConfigurationError,
+  getGoogleCalendarOAuthStatus,
   mountDashboard,
+  normalizeAdminDoctorPatch,
+  resolveGoogleRedirectUri,
   verifyGoogleOAuthState,
   verifySessionToken
 };

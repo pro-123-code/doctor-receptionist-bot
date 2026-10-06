@@ -17,7 +17,7 @@ async function syncReligiousHolidayEvents({
   const currentDateKey = formatDateKey(currentDate);
   const targetYears = [currentDate.year, currentDate.year + 1];
   const holidays = targetYears.flatMap((year) => getReligiousHolidays(doctorProfile.religion, year))
-    .filter(({ date }) => date >= currentDateKey);
+    .filter(({ date }) => date >= currentDateKey && !doctorProfile.religiousHolidayOpenDays?.includes(date));
   const desiredEvents = holidays.map((holiday) => ({
     ...holiday,
     eventId: `doctorbot${crypto.createHash('sha256')

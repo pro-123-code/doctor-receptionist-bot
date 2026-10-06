@@ -52,19 +52,18 @@
 
     <section id="doctor-dashboard" hidden>
       <section id="clinic-setup-panel" class="mb-5" aria-labelledby="setup-title" hidden>
-        <div class="clinic-mark fw-bold">CLINIC SETUP</div>
+        <div id="clinic-setup-eyebrow" class="clinic-mark fw-bold">CLINIC SETUP</div>
         <h1 id="setup-title" class="h2">Configure your clinic</h1>
         <form id="doctor-settings-form" class="row g-3">
           <div class="col-sm-6"><label class="form-label" for="profile-doctor-name">Doctor name</label><input id="profile-doctor-name" class="form-control" required maxlength="120"></div>
           <div class="col-sm-6"><label class="form-label" for="profile-clinic-name">Clinic name</label><input id="profile-clinic-name" class="form-control" required maxlength="160"></div>
+          <div id="profile-email-field" class="col-sm-6" hidden><label class="form-label" for="profile-email">Doctor login email</label><input id="profile-email" class="form-control" type="email"></div>
           <div class="col-sm-6"><label class="form-label" for="profile-religion">Religion</label><select id="profile-religion" class="form-select" required><option value="Christian">Christian</option><option value="Muslim">Muslim</option><option value="Hindu">Hindu</option><option value="Other">Other</option></select></div>
-          <div class="col-md-6"><label class="form-label" for="profile-facilities">Facilities (one per line)</label><textarea id="profile-facilities" class="form-control" rows="4" required></textarea></div>
-          <div class="col-md-6"><label class="form-label" for="profile-services">Treatments and services (one per line)</label><textarea id="profile-services" class="form-control" rows="4" required></textarea></div>
           <div class="col-md-6"><label class="form-label" for="basic-checkup-fee">Basic checkup fee (Rs.)</label><input id="basic-checkup-fee" class="form-control" type="number" min="0" max="10000000" step="0.01" required></div>
           <div class="col-12">
-            <label class="form-label" for="facility-pricing-list">Facility and treatment prices (Rs.)</label>
+            <label class="form-label" for="facility-pricing-list">Facilities, treatments and prices</label>
             <div id="facility-pricing-list" class="vstack gap-2"></div>
-            <button id="add-facility-pricing" class="btn btn-outline-secondary btn-sm mt-2" type="button">Add priced item</button>
+            <button id="add-facility-pricing" class="btn btn-outline-secondary btn-sm mt-2" type="button">Add facility or treatment</button>
           </div>
           <div class="col-12"><label class="form-label" for="profile-consultation-details">Consultation details</label><textarea id="profile-consultation-details" class="form-control" rows="3" maxlength="2000" required></textarea></div>
           <fieldset class="col-12">
@@ -84,6 +83,10 @@
             <div class="d-flex gap-2"><input id="off-day-date" class="form-control" type="date"><button id="add-off-day" class="btn btn-outline-secondary" type="button">Add date</button></div>
             <ul id="off-day-list" class="list-unstyled mt-2 mb-0" aria-live="polite"></ul>
           </div>
+          <fieldset class="col-12">
+            <legend class="form-label">Religious holidays</legend>
+            <div id="religious-holiday-list" class="d-flex flex-wrap gap-3"></div>
+          </fieldset>
           <div class="col-md-6"><label class="form-label" for="profile-welcome">Welcome message</label><textarea id="profile-welcome" class="form-control" rows="3" maxlength="1000"></textarea></div>
           <div class="col-12 d-flex gap-2"><button class="btn btn-primary" type="submit">Save clinic setup</button><button id="cancel-clinic-setup" class="btn btn-outline-secondary" type="button" hidden>Cancel</button></div>
         </form>
@@ -105,6 +108,7 @@
           <div>
             <p id="calendar-connection-status" class="text-secondary mb-1" aria-live="polite"></p>
             <a id="connect-calendar" class="btn btn-outline-primary" href="/api/auth/google" hidden>Connect Google Calendar</a>
+            <p id="calendar-redirect-uri" class="form-hint mt-2 mb-0" hidden></p>
             <p id="calendar-oauth-setup" class="form-hint mt-2 mb-0" hidden>Calendar connection needs Google OAuth credentials, a registered redirect URI, and a valid credential-encryption key.</p>
           </div>
         </div>
@@ -153,7 +157,7 @@
       <div class="table-responsive mb-5">
         <table class="table table-vcenter table-striped">
           <thead>
-            <tr><th>Doctor</th><th>Clinic</th><th>Email</th><th>Total</th><th>Upcoming</th><th>Status</th><th>Access</th></tr>
+            <tr><th>Doctor</th><th>Clinic</th><th>Email</th><th>Total</th><th>Upcoming</th><th>Setup</th><th>Calendar</th><th>Status</th><th>Access</th></tr>
           </thead>
           <tbody id="doctor-accounts"></tbody>
         </table>
@@ -161,12 +165,12 @@
 
       <section aria-labelledby="create-doctor-title">
         <h2 id="create-doctor-title" class="h3">Add a doctor</h2>
+        <p class="text-secondary">Only the login account is created here. Facilities, pricing, schedule, and holidays are managed in one place — the doctor's clinic setup — which you can also edit anytime via the Edit button.</p>
         <form id="create-doctor-form" class="row g-3">
           <div class="col-sm-6"><label class="form-label" for="doctor-name">Doctor name</label><input id="doctor-name" name="doctorName" class="form-control" required maxlength="120"></div>
           <div class="col-sm-6"><label class="form-label" for="clinic-name">Clinic name</label><input id="clinic-name" name="clinicName" class="form-control" required maxlength="160"></div>
           <div class="col-sm-6"><label class="form-label" for="doctor-email">Login email</label><input id="doctor-email" name="email" class="form-control" type="email" required></div>
           <div class="col-sm-6"><label class="form-label" for="doctor-password">Temporary password (12+ characters)</label><input id="doctor-password" name="password" class="form-control" type="password" minlength="12" required autocomplete="new-password"></div>
-          <div class="col-sm-6"><label class="form-label" for="doctor-facilities">Facilities (one per line)</label><textarea id="doctor-facilities" name="facilitiesList" class="form-control" rows="4" required></textarea></div>
           <div class="col-sm-6"><label class="form-label" for="doctor-welcome">Welcome message</label><textarea id="doctor-welcome" name="welcomeMessage" class="form-control" rows="4" maxlength="1000"></textarea></div>
           <div class="col-12"><button class="btn btn-primary" type="submit">Create doctor account</button></div>
         </form>
@@ -186,10 +190,14 @@
     const logoutButton = document.querySelector('#logout');
     const doctorRows = document.querySelector('#doctor-accounts');
     const setupPanel = document.querySelector('#clinic-setup-panel');
+    const setupTitle = document.querySelector('#setup-title');
+    const setupEyebrow = document.querySelector('#clinic-setup-eyebrow');
+    const profileEmailField = document.querySelector('#profile-email-field');
     const clinicExperience = document.querySelector('#clinic-experience');
     const editClinicSetupButton = document.querySelector('#edit-clinic-setup');
     const cancelClinicSetupButton = document.querySelector('#cancel-clinic-setup');
     const offDayList = document.querySelector('#off-day-list');
+    const religiousHolidayList = document.querySelector('#religious-holiday-list');
     const facilityPricingList = document.querySelector('#facility-pricing-list');
     const whatsappStatus = document.querySelector('#whatsapp-connection-status');
     const whatsappButton = document.querySelector('#connect-whatsapp');
@@ -197,8 +205,10 @@
     const whatsappQr = document.querySelector('#whatsapp-qr');
     let whatsappPollTimer;
     let configuredOffDays = [];
+    let configuredHolidayOpenDays = [];
     let clinicSetupComplete = false;
     let editingClinicSetup = false;
+    let editingAdminDoctorId = null;
 
     function showError(message) {
       notice.textContent = message;
@@ -273,21 +283,31 @@
       }
     }
 
-    async function loadDoctorSettings() {
-      const response = await fetch('/api/dashboard/settings', { credentials: 'same-origin' });
+    async function loadDoctorSettings(endpoint = '/api/dashboard/settings') {
+      const response = await fetch(endpoint, { credentials: 'same-origin' });
       if (!response.ok) throw new Error('Could not load clinic settings.');
       const settings = await response.json();
       document.querySelector('#profile-doctor-name').value = settings.doctorName;
       document.querySelector('#profile-clinic-name').value = settings.clinicName;
+      document.querySelector('#profile-email').value = settings.email || '';
+      profileEmailField.hidden = !editingAdminDoctorId;
+      document.querySelector('#profile-email').required = Boolean(editingAdminDoctorId);
       document.querySelector('#profile-religion').value = settings.religion || 'Other';
-      document.querySelector('#profile-facilities').value = settings.facilitiesList.join('\n');
-      document.querySelector('#profile-services').value = (settings.servicesList || []).join('\n');
       document.querySelector('#basic-checkup-fee').value = settings.basicCheckupFee ?? '';
       document.querySelector('#profile-consultation-details').value = settings.consultationDetails || '';
-      const listedItems = [...settings.facilitiesList, ...(settings.servicesList || [])];
-      const pricingRows = settings.facilityPricing?.length
-        ? settings.facilityPricing
-        : listedItems.map((name) => ({ name, price: '' }));
+      const pricingByName = new Map((settings.facilityPricing || []).map((item) => [
+        `${item.category || 'facility'}:${item.name.toLocaleLowerCase('en')}`,
+        { ...item, category: item.category || 'facility' }
+      ]));
+      for (const name of settings.facilitiesList || []) {
+        const key = `facility:${name.toLocaleLowerCase('en')}`;
+        if (!pricingByName.has(key)) pricingByName.set(key, { category: 'facility', name, price: '' });
+      }
+      for (const name of settings.servicesList || []) {
+        const key = `service:${name.toLocaleLowerCase('en')}`;
+        if (!pricingByName.has(key)) pricingByName.set(key, { category: 'service', name, price: '' });
+      }
+      const pricingRows = [...pricingByName.values()];
       facilityPricingList.replaceChildren();
       for (const pricing of pricingRows.length ? pricingRows : [{ name: '', price: '' }]) {
         appendFacilityPricingRow(pricing);
@@ -299,11 +319,24 @@
       });
       configuredOffDays = [...(settings.offDays || [])];
       renderOffDays();
+      configuredHolidayOpenDays = [...(settings.religiousHolidayOpenDays || [])];
+      renderReligiousHolidays(settings.religiousHolidays || []);
       clinicSetupComplete = settings.setupComplete === true;
-      setupPanel.hidden = clinicSetupComplete && !editingClinicSetup;
-      clinicExperience.hidden = !clinicSetupComplete || editingClinicSetup;
-      editClinicSetupButton.hidden = !clinicSetupComplete || editingClinicSetup;
-      cancelClinicSetupButton.hidden = !editingClinicSetup;
+      if (editingAdminDoctorId) {
+        setupPanel.hidden = false;
+        clinicExperience.hidden = true;
+        editClinicSetupButton.hidden = true;
+        cancelClinicSetupButton.hidden = false;
+        setupEyebrow.textContent = 'SUPERADMIN DOCTOR EDIT';
+        setupTitle.textContent = `${settings.doctorName} | ${settings.clinicName}`;
+      } else {
+        setupPanel.hidden = clinicSetupComplete && !editingClinicSetup;
+        clinicExperience.hidden = !clinicSetupComplete || editingClinicSetup;
+        editClinicSetupButton.hidden = !clinicSetupComplete || editingClinicSetup;
+        cancelClinicSetupButton.hidden = !editingClinicSetup;
+        setupEyebrow.textContent = 'CLINIC SETUP';
+        setupTitle.textContent = 'Configure your clinic';
+      }
       document.querySelector('#calendar-connection-status').textContent = settings.googleCalendarConnected
         ? `Connected to ${settings.googleCalendarId}`
         : 'Not connected';
@@ -312,9 +345,44 @@
         : 'Connect Google Calendar';
       const connectCalendar = document.querySelector('#connect-calendar');
       const oauthSetup = document.querySelector('#calendar-oauth-setup');
+      const redirectUriHint = document.querySelector('#calendar-redirect-uri');
+      oauthSetup.textContent = settings.calendarOAuthError ||
+        'Calendar connection needs Google OAuth credentials, a registered redirect URI, and a valid credential-encryption key.';
       connectCalendar.hidden = !settings.calendarOAuthAvailable;
       oauthSetup.hidden = settings.calendarOAuthAvailable;
+      redirectUriHint.hidden = !settings.googleRedirectUri;
+      redirectUriHint.textContent = settings.googleRedirectUri
+        ? `Google Cloud Console → Credentials → Authorized redirect URIs must include exactly: ${settings.googleRedirectUri}`
+        : '';
       return settings;
+    }
+
+    async function refreshReligiousHolidays(religion) {
+      const endpoint = editingAdminDoctorId
+        ? `/api/admin/doctors/${encodeURIComponent(editingAdminDoctorId)}?religion=${encodeURIComponent(religion)}`
+        : `/api/dashboard/settings?religion=${encodeURIComponent(religion)}`;
+      const response = await fetch(endpoint, { credentials: 'same-origin' });
+      if (!response.ok) throw new Error('Could not load religious holidays.');
+      const settings = await response.json();
+      const knownDates = new Set((settings.religiousHolidays || []).map((holiday) => holiday.date));
+      configuredHolidayOpenDays = configuredHolidayOpenDays.filter((date) => knownDates.has(date));
+      renderReligiousHolidays(settings.religiousHolidays || []);
+    }
+
+    async function editDoctorProfile(doctorId) {
+      try {
+        editingAdminDoctorId = doctorId;
+        editingClinicSetup = true;
+        dashboardSection.hidden = false;
+        adminSection.hidden = true;
+        logoutButton.hidden = false;
+        await loadDoctorSettings(`/api/admin/doctors/${encodeURIComponent(doctorId)}`);
+      } catch (error) {
+        editingAdminDoctorId = null;
+        dashboardSection.hidden = true;
+        adminSection.hidden = false;
+        showError(error.message);
+      }
     }
 
     function renderOffDays() {
@@ -335,6 +403,31 @@
       }
     }
 
+    function renderReligiousHolidays(holidays) {
+      religiousHolidayList.replaceChildren();
+      for (const holiday of holidays) {
+        const label = document.createElement('label');
+        label.className = 'form-check';
+        const checkbox = document.createElement('input');
+        checkbox.className = 'form-check-input religious-holiday-open';
+        checkbox.type = 'checkbox';
+        checkbox.value = holiday.date;
+        checkbox.checked = configuredHolidayOpenDays.includes(holiday.date);
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) {
+            if (!configuredHolidayOpenDays.includes(holiday.date)) configuredHolidayOpenDays.push(holiday.date);
+            configuredOffDays = configuredOffDays.filter((date) => date !== holiday.date);
+            renderOffDays();
+          } else {
+            configuredHolidayOpenDays = configuredHolidayOpenDays.filter((date) => date !== holiday.date);
+          }
+        });
+        label.append(checkbox, document.createTextNode(` Keep clinic open: ${holiday.name} (${holiday.date})`));
+        religiousHolidayList.append(label);
+      }
+      if (!holidays.length) religiousHolidayList.textContent = 'No upcoming holidays for this religion.';
+    }
+
     function appendFacilityPricingRow(pricing = { name: '', price: '' }) {
       const row = document.createElement('div');
       row.className = 'row g-2 align-items-center pricing-row';
@@ -351,8 +444,23 @@
       nameInput.value = pricing.name || '';
       nameColumn.append(nameInput);
 
+      const categoryColumn = document.createElement('div');
+      categoryColumn.className = 'col-md-3';
+      const categoryInput = document.createElement('select');
+      categoryInput.className = 'form-select';
+      categoryInput.setAttribute('aria-label', 'Priced item category');
+      categoryInput.dataset.pricingCategory = '';
+      for (const [value, label] of [['facility', 'Facility'], ['service', 'Treatment or service']]) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        categoryInput.append(option);
+      }
+      categoryInput.value = pricing.category || 'facility';
+      categoryColumn.append(categoryInput);
+
       const priceColumn = document.createElement('div');
-      priceColumn.className = 'col-md-4';
+      priceColumn.className = 'col-md-3';
       const priceInput = document.createElement('input');
       priceInput.className = 'form-control';
       priceInput.type = 'number';
@@ -375,7 +483,7 @@
       removeButton.setAttribute('aria-label', 'Remove priced item');
       removeButton.addEventListener('click', () => row.remove());
       removeColumn.append(removeButton);
-      row.append(nameColumn, priceColumn, removeColumn);
+      row.append(nameColumn, categoryColumn, priceColumn, removeColumn);
       facilityPricingList.append(row);
     }
 
@@ -413,12 +521,27 @@
       doctorRows.replaceChildren();
       for (const doctor of doctors) {
         const row = document.createElement('tr');
-        for (const value of [doctor.doctorName, doctor.clinicName, doctor.email, doctor.totalAppointments, doctor.upcomingAppointments, doctor.isActive ? 'Active' : 'Inactive']) {
+        for (const value of [
+          doctor.doctorName,
+          doctor.clinicName,
+          doctor.email,
+          doctor.totalAppointments,
+          doctor.upcomingAppointments,
+          doctor.setupComplete ? 'Complete' : 'Pending',
+          doctor.googleCalendarConnected ? 'Connected' : 'Not connected',
+          doctor.isActive ? 'Active' : 'Inactive'
+        ]) {
           const cell = document.createElement('td');
           cell.textContent = String(value);
           row.append(cell);
         }
         const actionCell = document.createElement('td');
+        const edit = document.createElement('button');
+        edit.type = 'button';
+        edit.className = 'btn btn-outline-primary btn-sm me-2';
+        edit.textContent = 'Edit';
+        edit.addEventListener('click', () => editDoctorProfile(doctor.doctorId));
+        actionCell.append(edit);
         const toggle = document.createElement('button');
         toggle.type = 'button';
         toggle.className = doctor.isActive ? 'btn btn-outline-danger btn-sm' : 'btn btn-outline-success btn-sm';
@@ -481,10 +604,9 @@
         doctorName: document.querySelector('#profile-doctor-name').value,
         clinicName: document.querySelector('#profile-clinic-name').value,
         religion: document.querySelector('#profile-religion').value,
-        facilitiesList: document.querySelector('#profile-facilities').value.split('\n').map((item) => item.trim()).filter(Boolean),
-        servicesList: document.querySelector('#profile-services').value.split('\n').map((item) => item.trim()).filter(Boolean),
         basicCheckupFee: Number(document.querySelector('#basic-checkup-fee').value),
         facilityPricing: [...facilityPricingList.querySelectorAll('.pricing-row')].map((row) => ({
+          category: row.querySelector('[data-pricing-category]').value,
           name: row.querySelector('[data-pricing-name]').value,
           price: row.querySelector('[data-pricing-price]').value === ''
             ? null
@@ -493,11 +615,17 @@
         consultationDetails: document.querySelector('#profile-consultation-details').value,
         workingDays,
         offDays: configuredOffDays,
+        religiousHolidayOpenDays: configuredHolidayOpenDays,
         welcomeMessage: document.querySelector('#profile-welcome').value
       };
+      const isAdminEdit = Boolean(editingAdminDoctorId);
+      if (isAdminEdit) payload.email = document.querySelector('#profile-email').value;
       try {
         const setupWasComplete = clinicSetupComplete;
-        const response = await fetch('/api/dashboard/settings', {
+        const endpoint = isAdminEdit
+          ? `/api/admin/doctors/${encodeURIComponent(editingAdminDoctorId)}`
+          : '/api/dashboard/settings';
+        const response = await fetch(endpoint, {
           method: 'PUT',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
@@ -508,6 +636,14 @@
           throw new Error(result.error || 'Could not save clinic setup.');
         }
         notice.hidden = true;
+        if (isAdminEdit) {
+          editingAdminDoctorId = null;
+          editingClinicSetup = false;
+          dashboardSection.hidden = true;
+          adminSection.hidden = false;
+          await loadDoctors();
+          return;
+        }
         editingClinicSetup = false;
         const settings = await loadDoctorSettings();
         if (settings.setupComplete) {
@@ -526,6 +662,9 @@
       renderOffDays();
     });
     document.querySelector('#add-facility-pricing').addEventListener('click', () => appendFacilityPricingRow());
+    document.querySelector('#profile-religion').addEventListener('change', (event) => {
+      refreshReligiousHolidays(event.target.value).catch((error) => showError(error.message));
+    });
     editClinicSetupButton.addEventListener('click', () => {
       editingClinicSetup = true;
       setupPanel.hidden = false;
@@ -534,6 +673,14 @@
       cancelClinicSetupButton.hidden = false;
     });
     cancelClinicSetupButton.addEventListener('click', async () => {
+      if (editingAdminDoctorId) {
+        editingAdminDoctorId = null;
+        editingClinicSetup = false;
+        dashboardSection.hidden = true;
+        adminSection.hidden = false;
+        await loadDoctors();
+        return;
+      }
       editingClinicSetup = false;
       await loadDoctorSettings();
     });
@@ -563,7 +710,6 @@
     document.querySelector('#create-doctor-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
-      payload.facilitiesList = payload.facilitiesList.split('\n').map((item) => item.trim()).filter(Boolean);
       try {
         const response = await fetch('/api/admin/doctors', {
           method: 'POST',

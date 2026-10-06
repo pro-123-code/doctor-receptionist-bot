@@ -121,6 +121,7 @@ const religiousHolidayEventSchema = new Schema({
 }, { _id: false });
 
 const facilityPricingSchema = new Schema({
+  category: { type: String, enum: ['facility', 'service'], default: 'facility', required: true },
   name: { type: String, required: true, trim: true, maxlength: 100 },
   price: { type: Number, required: true, min: 0, max: 10_000_000 }
 }, { _id: false });
@@ -137,6 +138,7 @@ const doctorSchema = new Schema({
   consultationDetails: { type: String, maxlength: 2000, default: '' },
   workingDays: { type: [Number], enum: [0, 1, 2, 3, 4, 5, 6], default: [1, 2, 3, 4, 5] },
   offDays: { type: [String], default: [] },
+  religiousHolidayOpenDays: { type: [String], default: [] },
   religion: { type: String, enum: ['Christian', 'Muslim', 'Hindu', 'Other'], default: 'Other' },
   religiousHolidayEvents: { type: [religiousHolidayEventSchema], default: [] },
   setupComplete: { type: Boolean, default: false },

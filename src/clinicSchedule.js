@@ -56,8 +56,9 @@ function getReligiousHoliday(religion, dateKey) {
 
 function isClinicOpenOnDate(dateParts, doctorSchedule) {
   const dateKey = `${dateParts.year}-${String(dateParts.month).padStart(2, '0')}-${String(dateParts.day).padStart(2, '0')}`;
-  if (!isValidClinicDateKey(dateKey) || doctorSchedule.offDays?.includes(dateKey) ||
-    getReligiousHoliday(doctorSchedule.religion, dateKey)) return false;
+  if (!isValidClinicDateKey(dateKey) || doctorSchedule.offDays?.includes(dateKey)) return false;
+  if (doctorSchedule.religiousHolidayOpenDays?.includes(dateKey)) return true;
+  if (getReligiousHoliday(doctorSchedule.religion, dateKey)) return false;
   const weekday = new Date(Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day)).getUTCDay();
   return doctorSchedule.workingDays?.includes(weekday) === true;
 }
