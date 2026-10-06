@@ -148,6 +148,7 @@
         <div class="border-top pt-3" aria-labelledby="whatsapp-title">
           <h3 id="whatsapp-title" class="h4">WhatsApp connection</h3>
           <p id="whatsapp-connection-status" class="text-secondary" aria-live="polite">Not connected</p>
+          <p id="whatsapp-session-notice" class="text-warning" hidden></p>
           <button id="connect-whatsapp" class="btn btn-success" type="button">Connect WhatsApp</button>
           <div id="whatsapp-qr-panel" class="mt-3" hidden>
             <img id="whatsapp-qr" width="320" height="320" alt="WhatsApp device-linking QR code">
@@ -590,6 +591,9 @@
         error: 'Could not start WhatsApp. Try again.'
       };
       whatsappStatus.textContent = labels[state.status] || 'Not connected';
+      const sessionNotice = document.querySelector('#whatsapp-session-notice');
+      sessionNotice.hidden = state.sessionPersistent !== false || !state.sessionNotice;
+      sessionNotice.textContent = state.sessionNotice || '';
       whatsappQrPanel.hidden = !state.qrDataUrl;
       if (state.qrDataUrl) whatsappQr.src = state.qrDataUrl;
       whatsappButton.disabled = ['starting', 'qr', 'connected', 'reconnecting'].includes(state.status);

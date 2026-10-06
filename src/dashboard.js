@@ -762,7 +762,13 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       return response.status(409).json({ error: 'Save your clinic setup before connecting WhatsApp' });
     }
     const state = whatsappConnection.getWhatsAppConnectionStatus?.(user.doctorId) || { status: 'disconnected' };
-    response.json({ status: state.status, qrDataUrl: state.qrDataUrl || null });
+    const sessionInfo = whatsappConnection.getWhatsAppSessionInfo?.() || {};
+    response.json({
+      status: state.status,
+      qrDataUrl: state.qrDataUrl || null,
+      sessionPersistent: sessionInfo.persistent !== false,
+      sessionNotice: sessionInfo.notice || null
+    });
   });
 
   app.put('/api/dashboard/settings', requireDashboardAuth, async (request, response) => {

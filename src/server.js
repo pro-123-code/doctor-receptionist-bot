@@ -21,6 +21,11 @@ const { drainInboundQueue, enqueueInboundMessage, getMessageId, getReceivedAt } 
 const { syncReligiousHolidayEvents } = require('./religiousCalendar');
 const { isVoiceErrorRetryable, translateVoiceMessageToEnglish } = require('./voiceTranscription');
 const { createCalendarApiClient, resolveGoogleCredentials } = require('./calendarAccess');
+const {
+  formatSlotOffer: formatSlotOfferText,
+  isMoreSlotRequest,
+  paginateSlots: paginateSlotOffers
+} = require('./slotOffers');
 const { privacyPolicy, termsOfService } = require('./legalPages');
 
 const app = express();
@@ -44,6 +49,10 @@ const appointmentDurationMinutes = Number.parseInt(process.env.APPOINTMENT_DURAT
 const appointmentLookaheadDays = Number.parseInt(process.env.APPOINTMENT_LOOKAHEAD_DAYS || '7', 10);
 const officeStartHour = Number.parseInt(process.env.OFFICE_START_HOUR || '9', 10);
 const officeEndHour = Number.parseInt(process.env.OFFICE_END_HOUR || '17', 10);
+const appointmentSlotsPerOffer = (() => {
+  const parsed = Number.parseInt(process.env.APPOINTMENT_SLOTS_PER_OFFER || '12', 10);
+  return Number.isInteger(parsed) && parsed >= 4 && parsed <= 24 ? parsed : 12;
+})();
 const maxInputLength = 500;
 const maxNameLength = 100;
 const maxPhoneLength = 30;
@@ -110,6 +119,7 @@ app.get('/dashboard-sw.js', (_request, response) => {
 mountDashboard(app, Appointment, timeZone, doctorId, {
   startWhatsAppConnection: connectDoctorWhatsApp,
   getWhatsAppConnectionStatus,
+  getWhatsAppSessionInfo,
   syncReligiousHolidays: syncDoctorReligiousHolidays
 });
 
@@ -345,7 +355,18 @@ async function findAvailableSlots(requestedDate, doctorProfile) {
 
   return buildCandidateSlots(timeMin, timeMax, doctorProfile).filter(
     (slot) => !busyPeriods.some((busyPeriod) => overlaps(slot, busyPeriod))
-  ).slice(0, 8);
+  );
+}
+
+function paginateSlots(availableSlots, offset) {
+  return paginateSlotOffers(availableSlots, offset, {
+    timeZone,
+    limit: appointmentSlotsPerOffer
+  });
+}
+
+function formatSlotOffer(slots, moreAvailable, intro) {
+  return formatSlotOfferText(slots, formatSlot, moreAvailable, intro);
 }
 
 function scheduleAppointmentReminder(doctorProfile, sender, slot, patientName) {
@@ -604,7 +625,8 @@ async function handleConversationMessage(sender, message, doctorProfile) {
   }
 
   if (conversation.step === 'calendarSelection') {
-    if (!conversation.slots?.length) {
+    const wantsMoreSlots = isMoreSlotRequest(normalizedMessage) && conversation.moreSlotsAvailable;
+    if (!conversation.slots?.length || wantsMoreSlots) {
       try {
         const availableSlots = await findAvailableSlots(conversation.requestedDate, doctorProfile);
         if (!availableSlots.length) {
@@ -613,11 +635,13 @@ async function handleConversationMessage(sender, message, doctorProfile) {
           await saveConversation(sender, conversation, targetDoctorId);
           return 'Maazrat, us tareekh ko koi waqt dastiyab nahi. Meherbani karke doosri tareekh batayein.';
         }
-        conversation.slots = availableSlots;
+        const page = paginateSlots(availableSlots, wantsMoreSlots ? conversation.slotPage : 0);
+        conversation.slots = page.slots;
+        conversation.slotPage = page.nextOffset;
+        conversation.moreSlotsAvailable = page.moreAvailable;
         conversation.updatedAt = Date.now();
         await saveConversation(sender, conversation, targetDoctorId);
-        return 'Meherbani karke neeche diye gaye auqaat mein se ek muntakhib karein:\n' +
-          availableSlots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
+        return formatSlotOffer(page.slots, page.moreAvailable);
       } catch (error) {
         logServiceError('Calendar availability', error, [], targetDoctorId);
         return 'Maazrat, waqt check karne mein mushkil aa rahi hai. Meherbani karke thori dair baad dobara reply karein.';
@@ -667,15 +691,19 @@ async function handleConversationMessage(sender, message, doctorProfile) {
     if (!booked) {
       try {
         conversation.step = 'calendarSelection';
-        conversation.slots = await findAvailableSlots(conversation.requestedDate, doctorProfile);
-        if (!conversation.slots.length) {
+        const availableSlots = await findAvailableSlots(conversation.requestedDate, doctorProfile);
+        if (!availableSlots.length) {
           await deleteConversation(sender, targetDoctorId);
           return 'Maazrat, woh waqt abhi kisi aur ne le liya hai aur is waqt koi doosra waqt dastiyab nahi hai.';
         }
+        const page = paginateSlots(availableSlots, 0);
+        conversation.slots = page.slots;
+        conversation.slotPage = page.nextOffset;
+        conversation.moreSlotsAvailable = page.moreAvailable;
         conversation.updatedAt = Date.now();
         await saveConversation(sender, conversation, targetDoctorId);
         return 'Maazrat, woh waqt abhi kisi aur ne le liya hai. Meherbani karke doosra waqt muntakhib karein:\n' +
-          conversation.slots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
+          formatSlotOffer(page.slots, page.moreAvailable, 'Meherbani karke in auqaat mein se ek muntakhib karein:');
       } catch (error) {
         logServiceError('Calendar refresh', error, [], targetDoctorId);
         await saveCalendarRetry(sender, conversation, targetDoctorId);
@@ -716,12 +744,18 @@ async function handleConversationMessage(sender, message, doctorProfile) {
       return 'Maazrat, us tareekh ko koi waqt dastiyab nahi. Meherbani karke doosri tareekh batayein.';
     }
 
+    const page = paginateSlots(availableSlots, 0);
     conversation.step = 'calendarSelection';
-    conversation.slots = availableSlots;
+    conversation.slots = page.slots;
+    conversation.slotPage = page.nextOffset;
+    conversation.moreSlotsAvailable = page.moreAvailable;
     conversation.updatedAt = Date.now();
     await saveConversation(sender, conversation, targetDoctorId);
-    return `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein is tareekh ke dastiyab auqaat yeh hain:\n` +
-      availableSlots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
+    return formatSlotOffer(
+      page.slots,
+      page.moreAvailable,
+      `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein is tareekh ke dastiyab auqaat yeh hain:`
+    );
   }
 
   const currentStep = conversationSteps[conversation.step];
@@ -762,10 +796,12 @@ async function handleConversationMessage(sender, message, doctorProfile) {
       return 'Maazrat, is waqt koi appointment ka waqt dastiyab nahi hai. Hamari team aap se rabta karegi.';
     }
 
-    conversation.slots = availableSlots;
+    const page = paginateSlots(availableSlots, 0);
+    conversation.slots = page.slots;
+    conversation.slotPage = page.nextOffset;
+    conversation.moreSlotsAvailable = page.moreAvailable;
     await saveConversation(sender, conversation, targetDoctorId);
-    return 'Shukriya, ' + conversation.details.name + '. Neeche diye gaye auqaat mein se ek muntakhib karein:\n' +
-      availableSlots.map(formatSlot).join('\n') + '\n\nSirf slot ka number reply karein.';
+    return formatSlotOffer(page.slots, page.moreAvailable, `Shukriya, ${conversation.details.name}. In auqaat mein se ek muntakhib karein:`);
   }
 
   await saveConversation(sender, conversation, targetDoctorId);
@@ -946,13 +982,33 @@ async function enqueueWhatsAppMessages(doctorProfile, socket, messages) {
   startDoctorQueueProcessor(doctorProfile, socket);
 }
 
+function getBaileysAuthRoot() {
+  const localDataRoot = process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share');
+  const configuredRoot = process.env.BAILEYS_AUTH_DIR;
+  return {
+    root: configuredRoot || path.join(localDataRoot, 'DoctorBot', 'sessions'),
+    // Container platforms keep an ephemeral filesystem, so WhatsApp device sessions
+    // disappear on every deploy unless BAILEYS_AUTH_DIR points at a persistent disk.
+    persistent: Boolean(configuredRoot)
+  };
+}
+
+function getBaileysSessionInfo() {
+  const { root, persistent } = getBaileysAuthRoot();
+  return {
+    authDirectory: root,
+    persistent,
+    notice: persistent
+      ? null
+      : 'WhatsApp device sessions are stored on an ephemeral filesystem and will be lost on every deploy. Set BAILEYS_AUTH_DIR to a mounted persistent disk.'
+  };
+}
+
 function getWhatsAppAuthDirectory(targetDoctorId) {
   if (!/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(targetDoctorId)) {
     throw new Error('Invalid doctor ID for WhatsApp session storage');
   }
-  const localDataRoot = process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share');
-  const configuredRoot = process.env.BAILEYS_AUTH_DIR || path.join(localDataRoot, 'DoctorBot', 'sessions');
-  const sessionDirectory = path.resolve(configuredRoot, `doctor_${targetDoctorId}`);
+  const sessionDirectory = path.resolve(getBaileysAuthRoot().root, `doctor_${targetDoctorId}`);
   const legacyDirectory = path.join(__dirname, '..', 'auth_info_baileys', targetDoctorId);
   if (!fs.existsSync(path.join(sessionDirectory, 'creds.json')) &&
     fs.existsSync(path.join(legacyDirectory, 'creds.json'))) {
@@ -1115,6 +1171,13 @@ async function startServer() {
 
         if (process.env.OPENAI_ALLOW_PHI_PROCESSING !== 'true' || !process.env.OPENAI_API_KEY) {
             console.warn('WhatsApp voice notes are disabled: set OPENAI_API_KEY and OPENAI_ALLOW_PHI_PROCESSING=true to enable Urdu/English voice message transcription.');
+        }
+
+        const sessionInfo = getBaileysSessionInfo();
+        if (!sessionInfo.persistent) {
+            console.warn(`WhatsApp sessions at ${sessionInfo.authDirectory} are on an ephemeral filesystem and will be lost on every deploy. Set BAILEYS_AUTH_DIR to a mounted persistent disk.`);
+        } else {
+            console.log(`WhatsApp sessions persist at ${sessionInfo.authDirectory}`);
         }
 
         app.listen(port, () => {

@@ -21,6 +21,7 @@ const { buildSystemInstruction } = require('../src/gemini');
 const { resolveGoogleCredentials, verifyDoctorCalendarAccess } = require('../src/calendarAccess');
 const { startDailyReport } = require('../src/cronJobs');
 const { privacyPolicy, termsOfService } = require('../src/legalPages');
+const { buildOfferOrder, formatSlotOffer, getSlotLocalDateKey, getZonedDateParts, isMoreSlotRequest, paginateSlots } = require('../src/slotOffers');
 
 require('../src/models');
 
@@ -751,7 +752,11 @@ test('WhatsApp dashboard routes are doctor-scoped and return browser QR state', 
     const [statusAuth, statusHandler] = routes.get('GET /api/dashboard/whatsapp/status');
     await statusAuth(request, response, () => {});
     statusHandler(request, response);
-    assert.deepEqual(response.body, qrState);
+    assert.deepEqual(response.body, {
+      ...qrState,
+      sessionPersistent: true,
+      sessionNotice: null
+    });
   } finally {
     DashboardUser.findById = originalFindById;
     Doctor.findOne = originalDoctorFindOne;
@@ -1996,4 +2001,124 @@ test('redirect URI stays https behind a TLS-terminating proxy such as Render', (
     headers: { host: 'ignored.example', 'x-forwarded-proto': 'http' }
   }, { GOOGLE_REDIRECT_URI: 'https://clinic.example/api/auth/google/callback' });
   assert.equal(explicit.redirectUri, 'https://clinic.example/api/auth/google/callback');
+});
+test('appointment slot offering reaches past the morning instead of stopping at eight', () => {
+  const daySlots = [];
+  for (let index = 0; index < 16; index += 1) {
+    // Asia/Karachi is UTC+5, so 09:00 local is 04:00Z.
+    const start = new Date(Date.UTC(2026, 9, 8, 4, index * 30));
+    const end = new Date(start.getTime() + 30 * 60 * 1000);
+    daySlots.push({ start, end });
+  }
+
+  const firstPage = paginateSlots(daySlots, 0, { timeZone: 'Asia/Karachi', limit: 12 });
+  assert.ok(firstPage.slots.length > 8, 'must offer more than eight slots');
+  assert.equal(firstPage.moreAvailable, true);
+  assert.equal(firstPage.nextOffset, firstPage.slots.length);
+  assert.equal(firstPage.totalAvailable, 16);
+  assert.equal(firstPage.slots[0].start.getTime(), daySlots[0].start.getTime());
+
+  const secondPage = paginateSlots(daySlots, firstPage.nextOffset, { timeZone: 'Asia/Karachi', limit: 12 });
+  assert.equal(secondPage.moreAvailable, false);
+  const offered = [...firstPage.slots, ...secondPage.slots];
+  assert.equal(offered.length, 16, 'every free slot must stay reachable');
+  assert.equal(new Set(offered.map((slot) => slot.start.getTime())).size, 16, 'pages must not repeat slots');
+
+  const latestLocalHour = getZonedDateParts(offered[offered.length - 1].start, 'Asia/Karachi').hour;
+  assert.equal(latestLocalHour, 16, 'the 4:30 PM slot must be reachable');
+});
+
+test('slot offering interleaves times across open days', () => {
+  const makeSlots = (day, hours) => hours.map((hour) => {
+    const start = new Date(Date.UTC(2026, 9, day, hour - 5, 0));
+    return { start, end: new Date(start.getTime() + 30 * 60 * 1000) };
+  });
+  const available = [...makeSlots(6, [9, 10, 11, 12, 13]), ...makeSlots(7, [9, 10, 11, 12, 13])];
+  const ordered = buildOfferOrder(available, 'Asia/Karachi');
+  const days = ordered.map((slot) => getSlotLocalDateKey(slot.start, 'Asia/Karachi'));
+  assert.deepEqual(days.slice(0, 6), ['2026-10-06', '2026-10-07', '2026-10-06', '2026-10-07', '2026-10-06', '2026-10-07'],
+    'should alternate days before repeating a time');
+  assert.equal(ordered.length, 10);
+});
+
+test('slot offers tell the patient how to request more times', () => {
+  const formatSlot = (slot, index) => `${index + 1}. slot`;
+  const slots = [{ start: new Date('2026-10-08T04:00:00Z'), end: new Date('2026-10-08T04:30:00Z') }];
+  assert.match(formatSlotOffer(slots, formatSlot, true), /Sirf slot ka number reply karein\./);
+  assert.match(formatSlotOffer(slots, formatSlot, true), /"more"/);
+  assert.doesNotMatch(formatSlotOffer(slots, formatSlot, false), /"more"/);
+  assert.equal(isMoreSlotRequest('more'), true);
+  assert.equal(isMoreSlotRequest('More'), true);
+  assert.equal(isMoreSlotRequest('aur'), true);
+  assert.equal(isMoreSlotRequest('agla'), true);
+  assert.equal(isMoreSlotRequest('andhera'), true);
+  assert.equal(isMoreSlotRequest('3'), false);
+  assert.equal(isMoreSlotRequest('moreau'), false);
+  assert.equal(isMoreSlotRequest(''), false);
+});
+
+test('conversation schema persists slot pagination state', async () => {
+  const Conversation = mongoose.models.Conversation;
+  const conversation = new Conversation({
+    doctorId: 'paging-tenant',
+    clinicId: 'paging-tenant',
+    senderJid: 'test@s.whatsapp.net',
+    step: 'calendarSelection',
+    slotPage: 12,
+    moreSlotsAvailable: true,
+    updatedAt: new Date(),
+    expiresAt: new Date(Date.now() + 60_000)
+  });
+  await assert.doesNotReject(conversation.validate());
+  assert.equal(conversation.slotPage, 12);
+  assert.equal(conversation.moreSlotsAvailable, true);
+});
+test('WhatsApp dashboard warns when sessions sit on an ephemeral filesystem', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'ephemeral-session-dashboard-secret-long';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalFindById = DashboardUser.findById;
+  const originalDoctorFindOne = Doctor.findOne;
+  const user = { _id: 'ephemeral-user', role: 'DOCTOR', doctorId: 'ephemeral-clinic', isActive: true };
+  DashboardUser.findById = () => ({ lean: async () => user });
+  Doctor.findOne = () => ({ lean: async () => ({ doctorId: user.doctorId, isActive: true, setupComplete: true }) });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', user.doctorId, {
+      getWhatsAppConnectionStatus: () => ({ status: 'connected' }),
+      getWhatsAppSessionInfo: () => ({
+        authDirectory: '/home/render/.local/share/DoctorBot/sessions',
+        persistent: false,
+        notice: 'WhatsApp device sessions are stored on an ephemeral filesystem and will be lost on every deploy. Set BAILEYS_AUTH_DIR to a mounted persistent disk.'
+      })
+    });
+    const token = createSessionToken(user, secret, Date.now() + 60_000);
+    const request = { headers: { cookie: `doctorbot_dashboard=${token}` } };
+    const response = {
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    };
+    const [statusAuth, statusHandler] = routes.get('GET /api/dashboard/whatsapp/status');
+    await statusAuth(request, response, () => {});
+    statusHandler(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.sessionPersistent, false);
+    assert.match(response.body.sessionNotice, /BAILEYS_AUTH_DIR/);
+  } finally {
+    DashboardUser.findById = originalFindById;
+    Doctor.findOne = originalDoctorFindOne;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
 });

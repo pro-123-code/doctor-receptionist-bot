@@ -29,6 +29,8 @@ const conversationSchema = new Schema({
   },
   requestedDate: { type: String, match: /^\d{4}-\d{2}-\d{2}$/ },
   slots: { type: [slotSchema], default: [] },
+  slotPage: { type: Number, default: 0, min: 0 },
+  moreSlotsAvailable: { type: Boolean, default: false },
   updatedAt: { type: Date, required: true },
   expiresAt: { type: Date, required: true, expires: 0 }
 }, { versionKey: false });
@@ -399,6 +401,8 @@ async function saveConversation(senderJid, conversation, doctorId = process.env.
         details: conversation.details,
         requestedDate: conversation.requestedDate,
         slots: conversation.slots || [],
+        slotPage: Number.isInteger(conversation.slotPage) && conversation.slotPage > 0 ? conversation.slotPage : 0,
+        moreSlotsAvailable: conversation.moreSlotsAvailable === true,
         updatedAt: now,
         expiresAt: new Date(now.getTime() + 30 * 60 * 1000)
       }
