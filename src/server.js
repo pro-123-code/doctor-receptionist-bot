@@ -5,7 +5,6 @@ const fsPromises = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
-const { google } = require('googleapis');
 const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const mongoose = require('mongoose');
@@ -17,11 +16,12 @@ const { startDailyReport } = require('./cronJobs');
 const { getCalendarErrorDetails } = require('./calendarErrors');
 const { getWelcomeMessage } = require('./greetings');
 const { formatFacilityRate, formatRupees } = require('./facilityPricing');
-const { decryptJson } = require('./secretBox');
 const { getReligiousHoliday, getReligiousHolidays, isClinicOpenOnDate } = require('./clinicSchedule');
 const { drainInboundQueue, enqueueInboundMessage, getMessageId, getReceivedAt } = require('./messageQueue');
 const { syncReligiousHolidayEvents } = require('./religiousCalendar');
 const { isVoiceErrorRetryable, translateVoiceMessageToEnglish } = require('./voiceTranscription');
+const { createCalendarApiClient, resolveGoogleCredentials } = require('./calendarAccess');
+const { privacyPolicy, termsOfService } = require('./legalPages');
 
 const app = express();
 const port = Number.parseInt(process.env.PORT || '3000', 10);
@@ -88,6 +88,15 @@ app.get('/health', (_request, response) => {
   response.status(databaseReady ? 200 : 503).json({ status: databaseReady ? 'ok' : 'degraded' });
 });
 
+// Public legal pages required to complete the Google OAuth consent screen.
+function sendHtmlPage(response, html) {
+  response.set('Cache-Control', 'public, max-age=3600');
+  response.type('text/html').send(html);
+}
+
+app.get('/privacy-policy', (_request, response) => sendHtmlPage(response, privacyPolicy()));
+app.get('/terms', (_request, response) => sendHtmlPage(response, termsOfService()));
+
 app.get('/dashboard.webmanifest', (_request, response) => {
   response.sendFile(path.join(__dirname, 'dashboard.webmanifest'));
 });
@@ -124,31 +133,8 @@ function logServiceError(operation, error, sensitiveValues = [], targetDoctorId 
 }
 
 function getCalendarClient(doctorProfile) {
-  const storedCredentials = doctorProfile.googleCredentialsEncrypted
-    ? decryptJson(doctorProfile.googleCredentialsEncrypted)
-    : doctorProfile.doctorId === doctorId
-      ? {
-        clientId: process.env.GOOGLE_CLIENT_ID,
-        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-        refreshToken: process.env.GOOGLE_REFRESH_TOKEN
-      }
-      : null;
-  const credentials = {
-    clientId: storedCredentials?.clientId || process.env.GOOGLE_CLIENT_ID,
-    clientSecret: storedCredentials?.clientSecret || process.env.GOOGLE_CLIENT_SECRET,
-    refreshToken: storedCredentials?.refreshToken
-  };
-  const missingCredential = !credentials.clientId ? 'GOOGLE_CLIENT_ID' :
-    !credentials.clientSecret ? 'GOOGLE_CLIENT_SECRET' :
-      !credentials.refreshToken ? 'GOOGLE_REFRESH_TOKEN' : null;
-  if (missingCredential) throw new Error(`Missing Google Calendar configuration: ${missingCredential}`);
-
-  const auth = new google.auth.OAuth2(
-    credentials.clientId,
-    credentials.clientSecret
-  );
-  auth.setCredentials({ refresh_token: credentials.refreshToken });
-  return google.calendar({ version: 'v3', auth });
+  const credentials = resolveGoogleCredentials(doctorProfile, process.env, doctorId);
+  return createCalendarApiClient(credentials);
 }
 
 function syncDoctorReligiousHolidays(targetDoctorId) {

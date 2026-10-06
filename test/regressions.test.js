@@ -18,7 +18,9 @@ const { formatRupees, getFacilityPrice, normalizeFacilityPricing } = require('..
 const { hashPassword, verifyPassword } = require('../src/passwords');
 const { decryptJson, encryptJson, hasValidEncryptionKey } = require('../src/secretBox');
 const { buildSystemInstruction } = require('../src/gemini');
+const { resolveGoogleCredentials, verifyDoctorCalendarAccess } = require('../src/calendarAccess');
 const { startDailyReport } = require('../src/cronJobs');
+const { privacyPolicy, termsOfService } = require('../src/legalPages');
 
 require('../src/models');
 
@@ -1242,9 +1244,9 @@ test('Google OAuth state is signed, doctor-bound, and expires', () => {
 test('Google Calendar OAuth uses shared config and stores the encrypted token per doctor', async () => {
   const environmentNames = [
     'DASHBOARD_SESSION_SECRET', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET',
-    'GOOGLE_REDIRECT_URI', 'DOCTOR_CONFIG_ENCRYPTION_KEY'
+    'GOOGLE_REDIRECT_URI', 'GOOGLE_REFRESH_TOKEN', 'DOCTOR_CONFIG_ENCRYPTION_KEY'
   ];
-  const previousEnvironment = Object.fromEntries(environmentNames.map((name) => [name, process.env[name]]));
+  const previousValues = Object.fromEntries(environmentNames.map((name) => [name, process.env[name]]));
   const DashboardUser = mongoose.models.DashboardUser;
   const Doctor = mongoose.models.Doctor;
   const originalMethods = {
@@ -1253,7 +1255,8 @@ test('Google Calendar OAuth uses shared config and stores the encrypted token pe
     dashboardFindOneAndUpdate: DashboardUser.findOneAndUpdate,
     doctorFindOne: Doctor.findOne,
     doctorUpdateOne: Doctor.updateOne,
-    OAuth2: google.auth.OAuth2
+    OAuth2: google.auth.OAuth2,
+    calendar: google.calendar
   };
   const user = { _id: 'oauth-doctor-user', role: 'DOCTOR', doctorId: 'clinic-alpha', isActive: true };
   const encryptionEnvironment = { DOCTOR_CONFIG_ENCRYPTION_KEY: 'c'.repeat(64) };
@@ -1261,10 +1264,12 @@ test('Google Calendar OAuth uses shared config and stores the encrypted token pe
   let oauthOptions;
   let doctorUpdate;
   let oauthConstructorArgs;
+  let calendarVerified = false;
   process.env.DASHBOARD_SESSION_SECRET = 'oauth-dashboard-session-secret-long-enough';
   process.env.GOOGLE_CLIENT_ID = 'shared-client-id';
   process.env.GOOGLE_CLIENT_SECRET = 'shared-client-secret';
   process.env.GOOGLE_REDIRECT_URI = 'https://clinic.example/api/auth/google/callback';
+  process.env.GOOGLE_REFRESH_TOKEN = 'bootstrap-refresh-token';
   process.env.DOCTOR_CONFIG_ENCRYPTION_KEY = encryptionEnvironment.DOCTOR_CONFIG_ENCRYPTION_KEY;
   DashboardUser.findById = () => ({ lean: async () => user });
   DashboardUser.updateOne = async (_filter, update) => {
@@ -1274,13 +1279,31 @@ test('Google Calendar OAuth uses shared config and stores the encrypted token pe
   DashboardUser.findOneAndUpdate = (filter) => ({
     lean: async () => filter.googleOAuthNonce === nonce ? user : null
   });
-  Doctor.findOne = () => ({ lean: async () => ({ doctorId: user.doctorId, isActive: true }) });
+  Doctor.findOne = () => {
+    const profile = {
+      doctorId: user.doctorId,
+      isActive: true,
+      googleCalendarId: 'primary',
+      googleCredentialsEncrypted: doctorUpdate?.update?.$set?.googleCredentialsEncrypted
+    };
+    const query = { select: () => query, lean: async () => profile };
+    return query;
+  };
   Doctor.updateOne = async (filter, update) => {
     doctorUpdate = { filter, update };
     return { matchedCount: 1 };
   };
+  google.calendar = () => ({
+    freebusy: {
+      query: async () => {
+        calendarVerified = true;
+        return { data: { calendars: { primary: { busy: [] } } } };
+      }
+    }
+  });
   google.auth.OAuth2 = class MockOAuth2 {
     constructor(...args) { oauthConstructorArgs = args; }
+    setCredentials() {}
     generateAuthUrl(options) {
       oauthOptions = options;
       return 'https://accounts.google.test/oauth';
@@ -1320,6 +1343,14 @@ test('Google Calendar OAuth uses shared config and stores the encrypted token pe
     ]);
     assert.equal(oauthOptions.access_type, 'offline');
     assert.equal(oauthOptions.prompt, 'consent');
+    assert.deepEqual(oauthOptions.scope, [
+      'https://www.googleapis.com/auth/calendar.freebusy',
+      'https://www.googleapis.com/auth/calendar.events'
+    ]);
+    // The full "calendar" scope is a Google RESTRICTED scope: requesting it makes
+    // Google block sign-in with "doesn't comply with Google's OAuth 2.0 policy"
+    // until the app completes verification.
+    assert.equal(oauthOptions.scope.includes('https://www.googleapis.com/auth/calendar'), false);
 
     request.query = { code: 'authorization-code', state: oauthOptions.state };
     response.locals = {};
@@ -1327,6 +1358,7 @@ test('Google Calendar OAuth uses shared config and stores the encrypted token pe
     await callbackAuth(request, response, () => {});
     await callbackHandler(request, response);
     assert.equal(response.redirectUrl, '/dashboard?calendar=connected');
+    assert.equal(calendarVerified, true);
     assert.equal(doctorUpdate.filter.doctorId, user.doctorId);
     assert.equal(doctorUpdate.filter.isActive, true);
     const encryptedCredentials = doctorUpdate.update.$set.googleCredentialsEncrypted;
@@ -1342,9 +1374,121 @@ test('Google Calendar OAuth uses shared config and stores the encrypted token pe
     Doctor.findOne = originalMethods.doctorFindOne;
     Doctor.updateOne = originalMethods.doctorUpdateOne;
     google.auth.OAuth2 = originalMethods.OAuth2;
+    google.calendar = originalMethods.calendar;
     for (const name of environmentNames) {
-      if (previousEnvironment[name] === undefined) delete process.env[name];
-      else process.env[name] = previousEnvironment[name];
+      if (previousValues[name] === undefined) delete process.env[name];
+      else process.env[name] = previousValues[name];
+    }
+  }
+});
+
+test('OAuth callback reports a failure instead of success when the token cannot be verified', async () => {
+  const environmentNames = [
+    'DASHBOARD_SESSION_SECRET', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_REDIRECT_URI', 'DOCTOR_CONFIG_ENCRYPTION_KEY'
+  ];
+  const previousValues = Object.fromEntries(environmentNames.map((name) => [name, process.env[name]]));
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalMethods = {
+    dashboardFindById: DashboardUser.findById,
+    dashboardUpdateOne: DashboardUser.updateOne,
+    dashboardFindOneAndUpdate: DashboardUser.findOneAndUpdate,
+    doctorFindOne: Doctor.findOne,
+    doctorUpdateOne: Doctor.updateOne,
+    OAuth2: google.auth.OAuth2,
+    calendar: google.calendar
+  };
+  const user = { _id: 'broken-calendar-user', role: 'DOCTOR', doctorId: 'clinic-broken', isActive: true };
+  let nonce;
+  let oauthOptions;
+  process.env.DASHBOARD_SESSION_SECRET = 'broken-calendar-session-secret-long';
+  process.env.GOOGLE_CLIENT_ID = 'shared-client-id';
+  process.env.GOOGLE_CLIENT_SECRET = 'shared-client-secret';
+  process.env.GOOGLE_REDIRECT_URI = 'https://clinic.example/api/auth/google/callback';
+  process.env.DOCTOR_CONFIG_ENCRYPTION_KEY = 'a'.repeat(64);
+  delete process.env.GOOGLE_REFRESH_TOKEN;
+  DashboardUser.findById = () => ({ lean: async () => user });
+  DashboardUser.updateOne = async (_filter, update) => {
+    nonce = update.$set.googleOAuthNonce;
+    return { matchedCount: 1 };
+  };
+  DashboardUser.findOneAndUpdate = (filter) => ({
+    lean: async () => filter.googleOAuthNonce === nonce ? user : null
+  });
+  Doctor.findOne = () => {
+    const profile = {
+      doctorId: user.doctorId,
+      isActive: true,
+      googleCalendarId: 'primary',
+      googleCredentialsEncrypted: 'iv.tag.ciphertext'
+    };
+    const query = { select: () => query, lean: async () => profile };
+    return query;
+  };
+  Doctor.updateOne = async () => ({ matchedCount: 1 });
+  google.auth.OAuth2 = class MockOAuth2 {
+    constructor() {}
+    setCredentials() {}
+    generateAuthUrl(options) { return 'https://accounts.google.test/oauth?state=' + encodeURIComponent(options.state); }
+    async getToken() { return { tokens: { refresh_token: 'revoked-refresh-token' } }; }
+  };
+  google.calendar = () => ({
+    freebusy: {
+      query: async () => {
+        const error = new Error('API has not been used in project 12345 before or it is disabled');
+        error.response = {
+          status: 403,
+          data: { error: { message: error.message, errors: [{ reason: 'accessNotConfigured' }] } }
+        };
+        throw error;
+      }
+    }
+  });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
+    const token = createSessionToken(user, process.env.DASHBOARD_SESSION_SECRET, Date.now() + 60_000);
+    const request = { headers: { cookie: `doctorbot_dashboard=${token}` }, query: {} };
+    const response = {
+      locals: {},
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; },
+      redirect(url) { this.redirectUrl = url; },
+      send(body) { this.body = body; }
+    };
+    const [startAuth, startHandler] = routes.get('GET /api/auth/google');
+    await startAuth(request, response, () => {});
+    await startHandler(request, response);
+    oauthOptions = { state: new URL(response.redirectUrl).searchParams.get('state') };
+
+    request.query = { code: 'authorization-code', state: oauthOptions.state };
+    response.locals = {};
+    const [callbackAuth, callbackHandler] = routes.get('GET /api/auth/google/callback');
+    await callbackAuth(request, response, () => {});
+    await callbackHandler(request, response);
+    assert.match(response.redirectUrl, /^\/dashboard\?calendar=failed&reason=/);
+    assert.doesNotMatch(response.redirectUrl, /calendar=connected/);
+  } finally {
+    DashboardUser.findById = originalMethods.dashboardFindById;
+    DashboardUser.updateOne = originalMethods.dashboardUpdateOne;
+    DashboardUser.findOneAndUpdate = originalMethods.dashboardFindOneAndUpdate;
+    Doctor.findOne = originalMethods.doctorFindOne;
+    Doctor.updateOne = originalMethods.doctorUpdateOne;
+    google.auth.OAuth2 = originalMethods.OAuth2;
+    google.calendar = originalMethods.calendar;
+    for (const name of environmentNames) {
+      if (previousValues[name] === undefined) delete process.env[name];
+      else process.env[name] = previousValues[name];
     }
   }
 });
@@ -1654,6 +1798,158 @@ test('doctor settings can preview religious holidays for an unsaved religion', a
     assert.ok(response.body.religiousHolidays.every(({ name }) =>
       /Eid al-Fitr|Eid al-Adha|End of Ramadan|Feast of the Sacrifice/i.test(name)));
     assert.deepEqual(response.body.religiousHolidayOpenDays, ['2026-04-05']);
+  } finally {
+    DashboardUser.findById = originalFindById;
+    Doctor.findOne = originalDoctorFindOne;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});test('calendar credentials resolve from encrypted doctor record or bootstrap environment', () => {
+  const environment = {
+    GOOGLE_CLIENT_ID: 'env-client',
+    GOOGLE_CLIENT_SECRET: 'env-secret',
+    GOOGLE_REFRESH_TOKEN: 'env-refresh',
+    DOCTOR_CONFIG_ENCRYPTION_KEY: 'e'.repeat(64)
+  };
+  const connected = {
+    doctorId: 'tenant-a',
+    googleCredentialsEncrypted: encryptJson({ refreshToken: 'doctor-refresh' }, environment)
+  };
+  assert.deepEqual(resolveGoogleCredentials(connected, environment, 'tenant-a'), {
+    clientId: 'env-client',
+    clientSecret: 'env-secret',
+    refreshToken: 'doctor-refresh'
+  });
+  assert.deepEqual(resolveGoogleCredentials({ doctorId: 'tenant-a' }, environment, 'tenant-a'), {
+    clientId: 'env-client',
+    clientSecret: 'env-secret',
+    refreshToken: 'env-refresh'
+  });
+  assert.deepEqual(resolveGoogleCredentials({ doctorId: 'tenant-b' }, environment, 'tenant-a'), {
+    clientId: 'env-client',
+    clientSecret: 'env-secret',
+    refreshToken: null
+  });
+});
+
+test('calendar verification reports not-connected, confirmed and revoked states', async () => {
+  const environment = {
+    GOOGLE_CLIENT_ID: 'env-client',
+    GOOGLE_CLIENT_SECRET: 'env-secret',
+    GOOGLE_REFRESH_TOKEN: 'env-refresh',
+    DOCTOR_CONFIG_ENCRYPTION_KEY: 'f'.repeat(64)
+  };
+  const notConnected = await verifyDoctorCalendarAccess({
+    doctorProfile: { doctorId: 'tenant-b', googleCalendarId: 'primary' },
+    environment,
+    bootstrapDoctorId: 'tenant-a'
+  });
+  assert.equal(notConnected.verified, false);
+  assert.equal(notConnected.code, 'CALENDAR_NOT_CONNECTED');
+
+  const originalCalendar = google.calendar;
+  try {
+    google.calendar = () => ({
+      freebusy: { query: async () => ({ data: { calendars: { primary: { busy: [] } } } }) }
+    });
+    const verified = await verifyDoctorCalendarAccess({
+      doctorProfile: {
+        doctorId: 'tenant-a',
+        googleCalendarId: 'primary',
+        googleCredentialsEncrypted: encryptJson({ refreshToken: 'doctor-refresh' }, environment)
+      },
+      environment,
+      bootstrapDoctorId: 'tenant-a'
+    });
+    assert.equal(verified.verified, true);
+    assert.equal(verified.code, null);
+
+    google.calendar = () => ({
+      freebusy: {
+        query: async () => {
+          const error = new Error('invalid_grant: Token has been expired or revoked.');
+          error.response = {
+            status: 400,
+            data: { error: { message: error.message, errors: [{ reason: 'invalid_grant' }] } }
+          };
+          throw error;
+        }
+      }
+    });
+    const revoked = await verifyDoctorCalendarAccess({
+      doctorProfile: {
+        doctorId: 'tenant-a',
+        googleCalendarId: 'primary',
+        googleCredentialsEncrypted: encryptJson({ refreshToken: 'doctor-refresh' }, environment)
+      },
+      environment,
+      bootstrapDoctorId: 'tenant-a'
+    });
+    assert.equal(revoked.verified, false);
+    assert.equal(revoked.code, 'invalid_grant');
+    assert.match(revoked.message, /Reconnect the calendar/);
+  } finally {
+    google.calendar = originalCalendar;
+  }
+});
+test('public legal pages expose privacy policy and terms for the OAuth consent screen', () => {
+  const policy = privacyPolicy();
+  const terms = termsOfService();
+  assert.match(policy, /<!doctype html>/i);
+  assert.match(policy, /Privacy Policy/);
+  assert.match(policy, /Voice notes/i);
+  assert.match(policy, /24 hours/);
+  assert.match(policy, /not for emergencies/i);
+  assert.match(policy, /Google/);
+  assert.match(policy, /mailto:/);
+  assert.match(terms, /Terms of Service/);
+  assert.match(terms, /Not medical advice/i);
+  assert.match(terms, /Acceptable use/i);
+  assert.doesNotMatch(policy + terms, /undefined|\[object Object\]/);
+});
+
+test('dashboard settings expose public legal page URLs', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'legal-url-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalFindById = DashboardUser.findById;
+  const originalDoctorFindOne = Doctor.findOne;
+  const user = { _id: 'legal-user', role: 'DOCTOR', doctorId: 'legal-tenant', isActive: true };
+  DashboardUser.findById = () => ({ lean: async () => user });
+  Doctor.findOne = () => ({
+    select: () => ({ lean: async () => ({ doctorId: user.doctorId, isActive: true }) }),
+    lean: async () => ({ doctorId: user.doctorId, isActive: true })
+  });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
+    const token = createSessionToken(user, secret, Date.now() + 60_000);
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}`, host: 'clinic.example' },
+      protocol: 'https',
+      query: {}
+    };
+    const response = {
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    };
+    const [settingsAuth, settingsHandler] = routes.get('GET /api/dashboard/settings');
+    await settingsAuth(request, response, () => {});
+    settingsHandler(request, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.privacyPolicyUrl, 'https://clinic.example/privacy-policy');
+    assert.equal(response.body.termsOfServiceUrl, 'https://clinic.example/terms');
   } finally {
     DashboardUser.findById = originalFindById;
     Doctor.findOne = originalDoctorFindOne;

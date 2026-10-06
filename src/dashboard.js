@@ -8,6 +8,7 @@ const { encryptJson, hasValidEncryptionKey } = require('./secretBox');
 const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
 const { getReligiousHolidays } = require('./clinicSchedule');
 const { isValidRupeeAmount, normalizeFacilityPricing } = require('./facilityPricing');
+const { verifyDoctorCalendarAccess } = require('./calendarAccess');
 
 const cookieName = 'doctorbot_dashboard';
 const sessionDurationSeconds = 8 * 60 * 60;
@@ -187,6 +188,16 @@ function resolveGoogleRedirectUri(request, environment = process.env) {
     };
   }
   return { redirectUri: derived, error: null };
+}
+
+// Absolute public origin of this deployment, used for the legal-page URLs that the
+// Google OAuth consent screen requires.
+function resolvePublicBaseUrl(request) {
+  const host = request?.get?.('host') || request?.headers?.host || '';
+  const forwardedProto = String(request?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim();
+  const protocol = (request?.protocol || forwardedProto || 'http').trim();
+  if (!host || !/^[^\s/@]+$/.test(host)) return '';
+  return `${protocol}://${host}`;
 }
 
 function getGoogleCalendarOAuthStatus(request, environment = process.env) {
@@ -420,7 +431,15 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         access_type: 'offline',
         prompt: 'consent',
         include_granted_scopes: true,
-        scope: ['https://www.googleapis.com/auth/calendar'],
+        // Deliberately NOT the full "calendar" scope: that is a Google RESTRICTED
+        // scope, which blocks sign-in with "doesn't comply with Google's OAuth
+        // policy" until the app completes verification. These two narrow scopes
+        // cover every Calendar call this service makes (free/busy lookup, event
+        // insert, event delete) and are only classified as sensitive.
+        scope: [
+          'https://www.googleapis.com/auth/calendar.freebusy',
+          'https://www.googleapis.com/auth/calendar.events'
+        ],
         state
       }));
     } catch (error) {
@@ -498,6 +517,20 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         } catch {
           console.error('Religious holiday calendar sync failed (Error)');
         }
+      }
+
+      // Prove the stored token actually works so a broken connection is never
+      // reported to the clinic as a successful one.
+      const savedDoctor = await Doctor.findOne({ doctorId: user.doctorId, isActive: true })
+        .select('+googleCredentialsEncrypted').lean();
+      const verification = savedDoctor ? await verifyDoctorCalendarAccess({
+        doctorProfile: savedDoctor,
+        bootstrapDoctorId: clinicId,
+        timeZone
+      }) : { verified: false, code: 'CALENDAR_NOT_CONNECTED', message: 'Calendar could not be verified.' };
+      if (!verification.verified) {
+        console.error(`Google Calendar verification failed after connect [${verification.code}]`);
+        return response.redirect(`/dashboard?calendar=failed&reason=${encodeURIComponent(verification.code || 'CALENDAR_VERIFICATION_FAILED')}`);
       }
       response.redirect('/dashboard?calendar=connected');
     } catch (error) {
@@ -591,8 +624,102 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       calendarOAuthAvailable: oauthStatus.available,
       calendarOAuthError: oauthStatus.error,
       googleRedirectUri: oauthStatus.redirectUri,
-      googleCalendarId: doctor.googleCalendarId
+      googleCalendarId: doctor.googleCalendarId,
+      privacyPolicyUrl: `${resolvePublicBaseUrl(request)}/privacy-policy`,
+      termsOfServiceUrl: `${resolvePublicBaseUrl(request)}/terms`
     });
+  });
+
+  app.get('/api/dashboard/calendar/status', requireDashboardAuth, async (request, response) => {
+    const user = response.locals.dashboardUser;
+    if (user.role !== 'DOCTOR' || !user.doctorId) {
+      return response.status(403).json({ error: 'Doctor access required' });
+    }
+    const oauthStatus = getGoogleCalendarOAuthStatus(request);
+    let doctorProfile;
+    try {
+      doctorProfile = await Doctor.findOne({ doctorId: user.doctorId, isActive: true })
+        .select('+googleCredentialsEncrypted').lean();
+    } catch (error) {
+      console.error(`Calendar status lookup failed (${error?.name || 'Error'})`);
+      return response.status(503).json({ error: 'Calendar status is temporarily unavailable' });
+    }
+    if (!doctorProfile) return response.status(403).json({ error: 'Doctor account is inactive' });
+
+    const verification = await verifyDoctorCalendarAccess({
+      doctorProfile,
+      bootstrapDoctorId: clinicId,
+      timeZone
+    });
+    response.json({
+      connected: doctorProfile.googleCalendarConnected === true,
+      verified: verification.verified,
+      calendarId: verification.calendarId,
+      calendarIdEditable: doctorProfile.googleCalendarId !== 'primary',
+      verificationCode: verification.code,
+      verificationMessage: verification.message,
+      oauthAvailable: oauthStatus.available,
+      oauthError: oauthStatus.error,
+      redirectUri: oauthStatus.redirectUri
+    });
+  });
+
+  app.put('/api/dashboard/calendar/settings', requireDashboardAuth, async (request, response) => {
+    const user = response.locals.dashboardUser;
+    if (user.role !== 'DOCTOR' || !user.doctorId) {
+      return response.status(403).json({ error: 'Doctor access required' });
+    }
+    const googleCalendarId = typeof request.body?.googleCalendarId === 'string'
+      ? request.body.googleCalendarId.trim()
+      : '';
+    if (!googleCalendarId || googleCalendarId.length > 250 || /[\r\n]/.test(googleCalendarId)) {
+      return response.status(400).json({ error: 'Provide a valid Google Calendar ID (or email address).' });
+    }
+
+    try {
+      const doctorProfile = await Doctor.findOneAndUpdate(
+        { doctorId: user.doctorId, isActive: true },
+        { $set: { googleCalendarId, updatedAt: new Date() } },
+        { new: true, runValidators: true }
+      ).select('+googleCredentialsEncrypted').lean();
+      if (!doctorProfile) return response.status(403).json({ error: 'Doctor account is inactive' });
+
+      const verification = await verifyDoctorCalendarAccess({
+        doctorProfile,
+        bootstrapDoctorId: clinicId,
+        timeZone
+      });
+      response.json({
+        googleCalendarId: doctorProfile.googleCalendarId,
+        verified: verification.verified,
+        verificationCode: verification.code,
+        verificationMessage: verification.message
+      });
+    } catch (error) {
+      console.error(`Calendar id update failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Calendar settings could not be saved' });
+    }
+  });
+
+  app.post('/api/dashboard/calendar/disconnect', requireDashboardAuth, async (_request, response) => {
+    const user = response.locals.dashboardUser;
+    if (user.role !== 'DOCTOR' || !user.doctorId) {
+      return response.status(403).json({ error: 'Doctor access required' });
+    }
+    try {
+      const update = await Doctor.updateOne(
+        { doctorId: user.doctorId, isActive: true },
+        { $set: { googleCalendarConnected: false, updatedAt: new Date() }, $unset: { googleCredentialsEncrypted: 1 } }
+      );
+      if (update.matchedCount !== 1) return response.status(403).json({ error: 'Doctor account is inactive' });
+      if (typeof whatsappConnection.syncReligiousHolidays === 'function') {
+        await whatsappConnection.syncReligiousHolidays(user.doctorId).catch(() => {});
+      }
+      response.json({ connected: false });
+    } catch (error) {
+      console.error(`Calendar disconnect failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Calendar could not be disconnected' });
+    }
   });
 
   app.post('/api/dashboard/whatsapp/connect', requireDashboardAuth, async (_request, response) => {
