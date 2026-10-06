@@ -125,7 +125,7 @@ app.get('/dashboard-sw.js', (_request, response) => {
 mountDashboard(app, Appointment, timeZone, doctorId, {
   startWhatsAppConnection: connectDoctorWhatsApp,
   getWhatsAppConnectionStatus,
-  getWhatsAppSessionInfo,
+  getWhatsAppSessionInfo: getBaileysSessionInfo,
   syncReligiousHolidays: syncDoctorReligiousHolidays
 });
 

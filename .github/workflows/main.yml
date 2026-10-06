@@ -31,6 +31,9 @@ jobs:
       - name: Syntax check
         run: npm run check
 
+      - name: Server module smoke test
+        run: npm run smoke
+
       - name: Test suite
         run: npm test
 

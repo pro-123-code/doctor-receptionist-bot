@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "check": "node --check src/server.js",
+    "smoke": "node test/smoke-startup.js",
     "test": "node --test"
   },
   "engines": {
