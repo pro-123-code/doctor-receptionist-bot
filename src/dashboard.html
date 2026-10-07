@@ -1271,6 +1271,54 @@
     const reportTimeInput = document.querySelector('#clinic-report-time');
     if (reportTimeInput) reportTimeInput.addEventListener('input', renderTimingSummary);
 
+    // Checks the priced items before anything is sent, so a blank price or a
+// duplicated name points at the row that needs fixing instead of the server
+// replying that the clinic has no items at all. The same rules run again on the
+// server, which is what actually decides.
+function readFacilityPricing() {
+      const rows = [...facilityPricingList.querySelectorAll('.pricing-row')];
+      for (const row of rows) row.classList.remove('!ring-2', '!ring-rose-400');
+
+      const fail = (row, message) => {
+        row.classList.add('!ring-2', '!ring-rose-400');
+        const focusTarget = row.querySelector('[data-pricing-price]') || row.querySelector('[data-pricing-name]');
+        if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
+        return { error: message };
+      };
+
+      if (!rows.length) {
+        return { error: 'Add at least one facility or treatment, using the "Add facility or treatment" button.' };
+      }
+
+      const seen = new Map();
+      const items = [];
+      for (const row of rows) {
+        const nameInput = row.querySelector('[data-pricing-name]');
+        const categoryInput = row.querySelector('[data-pricing-category]');
+        const priceInput = row.querySelector('[data-pricing-price]');
+        const name = (nameInput?.value || '').trim();
+        if (!name) return fail(row, 'Every facility or treatment needs a name. Fill in or remove the empty row.');
+        if (name.length > 100) return fail(row, `"${name.slice(0, 40)}…" is too long. Names must be 100 characters or fewer.`);
+
+        const key = name.toLocaleLowerCase('en');
+        if (seen.has(key)) {
+          return fail(row, `"${name}" is listed more than once. Rename or remove the duplicate.`);
+        }
+        seen.set(key, true);
+
+        const rawPrice = (priceInput?.value ?? '').toString().trim();
+        if (rawPrice === '') {
+          return fail(row, `Enter a price in rupees for "${name}", or type 0 if it is free.`);
+        }
+        const price = Number(rawPrice);
+        if (!Number.isFinite(price) || price < 0 || price > 10000000) {
+          return fail(row, `"${priceInput.value}" is not a valid price for "${name}". Use a number of rupees between 0 and 10,000,000.`);
+        }
+        items.push({ category: categoryInput?.value || 'facility', name, price });
+      }
+      return { items };
+    }
+
     function readClinicTiming() {
       const officeStartHour = Number(document.querySelector('#office-start-hour').value);
       const officeEndHour = Number(document.querySelector('#office-end-hour').value);
@@ -1569,19 +1617,18 @@
         showError('Fix the clinic timings before saving.');
         return;
       }
+      const pricing = readFacilityPricing();
+      if (pricing.error) {
+        showError(pricing.error);
+        return;
+      }
       const payload = {
         doctorName: document.querySelector('#profile-doctor-name').value,
         clinicName: document.querySelector('#profile-clinic-name').value,
         religion: document.querySelector('#profile-religion').value,
         ...timing,
         basicCheckupFee: Number(document.querySelector('#basic-checkup-fee').value),
-        facilityPricing: [...facilityPricingList.querySelectorAll('.pricing-row')].map((row) => ({
-          category: row.querySelector('[data-pricing-category]').value,
-          name: row.querySelector('[data-pricing-name]').value,
-          price: row.querySelector('[data-pricing-price]').value === ''
-            ? null
-            : Number(row.querySelector('[data-pricing-price]').value)
-        })),
+        facilityPricing: pricing.items,
         consultationDetails: document.querySelector('#profile-consultation-details').value,
         workingDays,
         offDays: configuredOffDays,

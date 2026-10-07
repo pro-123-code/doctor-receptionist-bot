@@ -1477,11 +1477,12 @@ test('OAuth callback reports a failure instead of success when the token cannot 
 });
 
 test('facility pricing validates unique rate rows and formats Pakistani rupees', () => {
-  const rates = normalizeFacilityPricing([
+  const { rows: rates, error: ratesError } = normalizeFacilityPricing([
     { name: 'Blood Test', price: 500 },
     { name: 'Ultrasound', price: 1500.5 },
     { name: 'Injection', price: 0.29 }
   ]);
+  assert.equal(ratesError, null);
   assert.deepEqual(rates, [
     { category: 'facility', name: 'Blood Test', price: 500 },
     { category: 'facility', name: 'Ultrasound', price: 1500.5 },
@@ -1490,9 +1491,56 @@ test('facility pricing validates unique rate rows and formats Pakistani rupees',
   assert.equal(getFacilityPrice({ facilityPricing: rates }, 'blood test'), 'Rs. 500');
   assert.equal(formatRupees(1500.5), 'Rs. 1,500.5');
   assert.equal(formatRupees(null), null);
-  assert.equal(normalizeFacilityPricing([{ name: 'Scan', price: -1 }]), null);
-  assert.equal(normalizeFacilityPricing([{ name: 'Lab', price: 100 }, { name: ' lab ', price: 200 }]), null);
-  assert.equal(normalizeFacilityPricing([{ name: 'Lab', price: null }]), null);
+  assert.equal(normalizeFacilityPricing([{ name: 'Scan', price: -1 }]).rows, null);
+  assert.equal(normalizeFacilityPricing([{ name: 'Lab', price: 100 }, { name: ' lab ', price: 200 }]).rows, null);
+  assert.equal(normalizeFacilityPricing([{ name: 'Lab', price: null }]).rows, null);
+});
+
+test('facility pricing explains exactly what is wrong instead of saying add an item', () => {
+  const priced = [
+    { category: 'facility', name: 'Clinical pathology', price: 700 },
+    { category: 'facility', name: 'Hemoglobin', price: 700 },
+    { category: 'facility', name: 'Investigation', price: 700 }
+  ];
+
+  // The reported failure: a full list where one price was left blank was rejected
+  // with a message claiming the clinic had no items at all.
+  const blankPrice = normalizeFacilityPricing(priced.map((item, index) =>
+    (index === 1 ? { ...item, price: '' } : item)));
+  assert.equal(blankPrice.rows, null);
+  assert.match(blankPrice.error, /Enter a price in rupees for "Hemoglobin"/);
+  assert.doesNotMatch(blankPrice.error, /Add at least one/);
+
+  const duplicate = normalizeFacilityPricing([...priced, { category: 'facility', name: 'hemoglobin', price: 900 }]);
+  assert.equal(duplicate.rows, null);
+  assert.match(duplicate.error, /"hemoglobin" is listed more than once/);
+  assert.doesNotMatch(duplicate.error, /Add at least one/);
+
+  const blankName = normalizeFacilityPricing([...priced, { category: 'facility', name: '   ', price: 100 }]);
+  assert.match(blankName.error, /needs a name/);
+  assert.doesNotMatch(blankName.error, /Add at least one/);
+
+  const longName = normalizeFacilityPricing([{ category: 'facility', name: 'x'.repeat(101), price: 100 }]);
+  assert.match(longName.error, /too long/);
+
+  const badCategory = normalizeFacilityPricing([{ category: 'medicine', name: 'Paracetamol', price: 50 }]);
+  assert.match(badCategory.error, /Facility or a Treatment or service/);
+
+  const badPrice = normalizeFacilityPricing([{ category: 'facility', name: 'Scan', price: 99_999_999 }]);
+  assert.match(badPrice.error, /not a valid price for "Scan"/);
+
+  // Only a genuinely empty list earns the "add one" instruction.
+  const empty = normalizeFacilityPricing([]);
+  assert.match(empty.error, /Add at least one facility or treatment/);
+
+  const tooMany = normalizeFacilityPricing(Array.from({ length: 41 }, (_v, i) => ({ name: `Item ${i}`, price: 10 })));
+  assert.match(tooMany.error, /at most 40/);
+
+  const notAList = normalizeFacilityPricing('nope');
+  assert.match(notAList.error, /could not be read/);
+
+  // A valid list still passes untouched.
+  assert.equal(normalizeFacilityPricing(priced).error, null);
 });
 
 test('voice transcription falls back to the transcription endpoint when translation fails', async () => {
@@ -2399,7 +2447,7 @@ test('clinic setup reports which field is invalid', async () => {
 
     assert.equal((await send({ ...base, workingDays: [] })).body.error, 'Select at least one working day.');
     assert.equal((await send({ ...base, facilityPricing: [] })).body.error,
-      'Add at least one facility or treatment with a price, using the "Add facility or treatment" button.');
+      'Add at least one facility or treatment, using the "Add facility or treatment" button.');
     assert.equal((await send({ ...base, officeStartHour: 18, officeEndHour: 9 })).body.error,
       'Check the clinic timings: closing time must be later than opening time, and bookings 1 to 30 days ahead.');
     assert.equal((await send({ ...base, basicCheckupFee: -5 })).body.error,

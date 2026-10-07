@@ -256,7 +256,7 @@ function normalizeDoctorSettings(body = {}) {
   const normalizedWorkingDays = normalizeWorkingDays(workingDays);
   const normalizedOffDays = normalizeOffDays(offDays);
   const requestedHolidayOpenDays = normalizeOffDays(body.religiousHolidayOpenDays || []);
-  const normalizedPricing = normalizeFacilityPricing(facilityPricing);
+  const pricingResult = normalizeFacilityPricing(facilityPricing);
 
   if (typeof doctorName !== 'string' || !doctorName.trim() || doctorName.length > 120) {
     return { error: 'Enter a doctor name of 120 characters or fewer.' };
@@ -264,9 +264,10 @@ function normalizeDoctorSettings(body = {}) {
   if (typeof clinicName !== 'string' || !clinicName.trim() || clinicName.length > 160) {
     return { error: 'Enter a clinic name of 160 characters or fewer.' };
   }
-  if (!normalizedPricing || !normalizedPricing.length) {
-    return { error: 'Add at least one facility or treatment with a price, using the "Add facility or treatment" button.' };
+  if (pricingResult.error) {
+    return { error: pricingResult.error };
   }
+  const normalizedPricing = pricingResult.rows;
   if (!normalizedWorkingDays) return { error: 'Select at least one working day.' };
   if (!normalizedOffDays) return { error: 'One or more clinic off-days is not a valid date.' };
   if (!requestedHolidayOpenDays) return { error: 'One or more religious holiday dates is not valid.' };
@@ -344,8 +345,9 @@ function normalizeAdminDoctorPatch(body = {}, existingDoctor = {}) {
     patch.basicCheckupFee = body.basicCheckupFee;
   }
   if (body.facilityPricing !== undefined) {
-    const normalizedPricing = normalizeFacilityPricing(body.facilityPricing);
-    if (!normalizedPricing) return null;
+    const pricingResult = normalizeFacilityPricing(body.facilityPricing);
+    if (pricingResult.error) return null;
+    const normalizedPricing = pricingResult.rows;
     patch.facilityPricing = normalizedPricing;
     patch.facilitiesList = normalizedPricing.filter(({ category }) => category === 'facility').map(({ name }) => name);
     patch.servicesList = normalizedPricing.filter(({ category }) => category === 'service').map(({ name }) => name);

@@ -230,16 +230,34 @@ async function renderAs(session) {
   return { ...harness, failure };
 }
 
+async function submitForm(session, mutateRows) {
+  const harness = await renderAs(session);
+  if (harness.failure.message) return { harness, error: harness.failure.message };
+  if (typeof mutateRows === 'function') mutateRows(harness.document);
+  const form = harness.document.querySelector('#doctor-settings-form');
+  if (typeof form.handlers.submit !== 'function') return { harness, error: 'the form has no submit handler' };
+  await form.handlers.submit({ preventDefault() {} });
+  for (let tick = 0; tick < 6; tick += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  const notice = harness.document.querySelector('#notice');
+  return { harness, message: notice.textContent, save: harness.bodies.find((body) => body.method === 'PUT') };
+}
+
+function rowByName(document, name) {
+  const rows = document.querySelector('#facility-pricing-list').children;
+  return rows.find((row) => row.querySelector('[data-pricing-name]').value === name);
+}
+
 async function main() {
   const failures = [];
+  const doctorSession = {
+    role: 'DOCTOR', doctorId: 'clinic-one', doctorName: 'Dr. Haider', clinicName: 'Apna city clinic'
+  };
 
   // Regression: the priced-item rows were rendered without the class the save
   // handler queries, so every clinic setup save submitted an empty list and the
   // server rejected it with "add at least one facility or treatment" even though
   // rows were visible on screen.
-  const submit = await renderAs({
-    role: 'DOCTOR', doctorId: 'clinic-one', doctorName: 'Dr. Haider', clinicName: 'Apna city clinic'
-  });
+  const submit = await renderAs(doctorSession);
   if (submit.failure.message) failures.push(`doctor session failed to render -> ${submit.failure.message}`);
   const pricingRows = submit.document.querySelector('#facility-pricing-list').children;
   if (pricingRows.length !== 3) {
@@ -285,7 +303,47 @@ async function main() {
     }
   }
 
-  const doctor = await renderAs({ role: 'DOCTOR', doctorId: 'clinic-one', doctorName: 'Dr. Haider', clinicName: 'Apna city clinic' });
+  // The reported symptom: three saved items on screen, yet the form refused to
+  // save. A blank price on one of them used to be reported as "add at least one
+  // facility or treatment", which is not what was wrong.
+  const blankPrice = await submitForm(doctorSession, (document) => {
+    rowByName(document, 'Hemoglobin').querySelector('[data-pricing-price]').value = '';
+  });
+  if (blankPrice.error) {
+    failures.push(`blank price run failed -> ${blankPrice.error}`);
+  } else {
+    if (blankPrice.save) failures.push('a blank price was still sent to the server instead of being caught first');
+    if (!/Enter a price in rupees for "Hemoglobin"/.test(blankPrice.message || '')) {
+      failures.push(`blank price reported as "${blankPrice.message}" instead of naming the item`);
+    }
+    if (/Add at least one/.test(blankPrice.message || '')) {
+      failures.push('a blank price is still reported as a missing item');
+    }
+  }
+
+  const duplicate = await submitForm(doctorSession, (document) => {
+    rowByName(document, 'Investigation').querySelector('[data-pricing-name]').value = 'hemoglobin';
+  });
+  if (duplicate.error) {
+    failures.push(`duplicate run failed -> ${duplicate.error}`);
+  } else {
+    if (duplicate.save) failures.push('a duplicate name was still sent to the server instead of being caught first');
+    if (!/listed more than once/.test(duplicate.message || '')) {
+      failures.push(`duplicate reported as "${duplicate.message}" instead of naming the duplicate`);
+    }
+  }
+
+  const blankName = await submitForm(doctorSession, (document) => {
+    rowByName(document, 'Hemoglobin').querySelector('[data-pricing-name]').value = '  ';
+  });
+  if (!blankName.error && blankName.save) {
+    failures.push('an empty name was still sent to the server instead of being caught first');
+  }
+  if (!blankName.error && !/needs a name/.test(blankName.message || '')) {
+    failures.push(`empty name reported as "${blankName.message}"`);
+  }
+
+  const doctor = await renderAs(doctorSession);
   if (doctor.failure.message) {
     failures.push(`doctor session failed to render -> ${doctor.failure.message}`);
   }
