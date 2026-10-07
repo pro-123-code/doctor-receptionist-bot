@@ -11,6 +11,7 @@
     "smoke": "node test/smoke-startup.js",
     "dashboard:check": "node test/dashboard-contract.js",
     "dashboard:runtime": "node test/dashboard-runtime.js",
+    "verify:deploy": "node scripts/verify-deployment.js",
     "test": "node --test"
   },
   "engines": {

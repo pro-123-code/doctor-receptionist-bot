@@ -46,6 +46,7 @@ const activeHolidaySyncs = new Map();
 const clinicId = process.env.CLINIC_ID || process.env.DOCTOR_ID;
 const doctorId = process.env.DOCTOR_ID || clinicId;
 const timeZone = 'Asia/Karachi';
+const startedAt = new Date();
 const appointmentDurationMinutes = Number.parseInt(process.env.APPOINTMENT_DURATION_MINUTES || '30', 10);
 const appointmentLookaheadDays = Number.parseInt(process.env.APPOINTMENT_LOOKAHEAD_DAYS || '7', 10);
 const officeStartHour = Number.parseInt(process.env.OFFICE_START_HOUR || '9', 10);
@@ -106,6 +107,19 @@ app.use(express.json());
 app.get('/health', (_request, response) => {
   const databaseReady = mongoose.connection.readyState === 1;
   response.status(databaseReady ? 200 : 503).json({ status: databaseReady ? 'ok' : 'degraded' });
+});
+
+// Reports the commit the running process was built from. Render injects
+// RENDER_GIT_COMMIT, so asking the live site which commit it serves settles
+// "did my push actually deploy?" without guessing from the UI.
+app.get('/version', (_request, response) => {
+  const commit = process.env.RENDER_GIT_COMMIT || process.env.APP_COMMIT || 'unknown';
+  response.json({
+    commit,
+    shortCommit: commit === 'unknown' ? commit : commit.slice(0, 7),
+    startedAt: process.env.RENDER_STARTED_AT || startedAt.toISOString(),
+    branch: process.env.RENDER_GIT_BRANCH || 'unknown'
+  });
 });
 
 // Public legal pages required to complete the Google OAuth consent screen.

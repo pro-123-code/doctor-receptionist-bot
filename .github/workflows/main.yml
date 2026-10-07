@@ -57,9 +57,28 @@ jobs:
           RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
           if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
-            echo "::warning::RENDER_DEPLOY_HOOK_URL secret is not configured. Add it in Settings > Secrets and variables > Actions to enable automatic deploys."
-            exit 0
+            echo "::error::RENDER_DEPLOY_HOOK_URL is not configured, so nothing was deployed."
+            echo "::error::Add it under Settings > Secrets and variables > Actions. Without it a push"
+            echo "::error::leaves production serving an older bundle while CI still reports success."
+            exit 1
           fi
           echo "Requesting Render deploy for $GITHUB_SHA ..."
           curl --fail --silent --show-error --location --request POST "$RENDER_DEPLOY_HOOK_URL"
           echo "Render deploy requested successfully."
+
+      # Proves the push reached production instead of assuming the hook worked.
+      # Render builds and restarts asynchronously, so the check retries for a while.
+      - name: Verify the deployment actually landed
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if node scripts/verify-deployment.js; then
+              echo "Deployment verified on attempt $attempt."
+              exit 0
+            fi
+            echo "Attempt $attempt: deployment not live yet, waiting 30s ..."
+            sleep 30
+          done
+          echo "::error::The deployed site is still not serving $GITHUB_SHA after 5 minutes."
+          exit 1
