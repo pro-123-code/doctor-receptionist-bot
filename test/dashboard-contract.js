@@ -161,6 +161,28 @@ if (!/navAppointments\.hidden = isSuperadmin/.test(inline)) {
   process.exit(1);
 }
 
+// Any class or data-attribute the script selects must actually exist somewhere in
+// the markup or be assigned while building elements. A hook that is queried but
+// never rendered makes the query return nothing, which silently empties a saved
+// payload instead of failing loudly.
+for (const [, selector] of inline.matchAll(/querySelectorAll?\('(\.[\w-]+|\[[\w-]+\])'\)/g)) {
+  const hook = selector.startsWith('[')
+    ? selector.slice(1, -1)
+    : selector.slice(1);
+  const isDataAttribute = selector.startsWith('[');
+  const camelCase = isDataAttribute
+    ? hook.replace(/^data-/, '').replace(/-([a-z])/g, (_m, letter) => letter.toUpperCase())
+    : null;
+  const assigned = isDataAttribute
+    ? new RegExp(`\\.dataset\\.${camelCase}\\s*=`).test(inline)
+    : false;
+  const rendered = html.includes(hook) || html.includes(`class="${hook}`) || html.includes(` ${hook}"`) || assigned;
+  if (!rendered) {
+    console.error(`dashboard: script selects '${selector}' but nothing ever renders that hook`);
+    process.exit(1);
+  }
+}
+
 console.log(`dashboard: ${requiredIds.length} elements, ${referenced.length} selectors, `
   + `${navLinks.length} nav anchors, ${navIds.length} nav handlers, `
   + `${adminRoutes} guarded admin routes and all endpoints verified`);

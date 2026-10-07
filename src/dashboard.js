@@ -265,7 +265,7 @@ function normalizeDoctorSettings(body = {}) {
     return { error: 'Enter a clinic name of 160 characters or fewer.' };
   }
   if (!normalizedPricing || !normalizedPricing.length) {
-    return { error: 'Add at least one facility or treatment with a price.' };
+    return { error: 'Add at least one facility or treatment with a price, using the "Add facility or treatment" button.' };
   }
   if (!normalizedWorkingDays) return { error: 'Select at least one working day.' };
   if (!normalizedOffDays) return { error: 'One or more clinic off-days is not a valid date.' };

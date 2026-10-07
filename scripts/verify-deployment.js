@@ -63,6 +63,11 @@ async function main() {
   check('per-clinic report time input is deployed', html.includes('id="clinic-report-time"'));
   check('voice diagnostic control is deployed', html.includes('id="admin-voice-test"'));
 
+  // The priced-item rows must carry the class the save handler queries, otherwise
+  // every clinic setup save submits an empty list and is rejected.
+  check('priced rows expose the hook the save handler reads',
+    /className = 'pricing-row/.test(html) && html.includes("querySelectorAll('.pricing-row')"));
+
   // A 404 here means the server routes did not deploy even if the HTML did.
   const adminResponse = await fetch(`${base}/api/admin/system`);
   check('superadmin API is routed on the server', adminResponse.status !== 404, `status ${adminResponse.status}`);

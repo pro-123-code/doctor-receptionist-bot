@@ -16,6 +16,32 @@ if (!inlineScripts.length) {
 }
 const script = inlineScripts[inlineScripts.length - 1];
 
+// Supports the selector shapes the dashboard actually uses: a class, a class with
+// the :checked pseudo class, and a data-attribute. Without real traversal a saved
+// payload can silently come back empty.
+function matchesSelector(node, selector) {
+  if (selector === '.working-day:checked') return Boolean(node.checked);
+  const attribute = /^\[([\w-]+)\]$/.exec(selector);
+  if (attribute) {
+    const key = attribute[1].replace(/^data-/, '').replace(/-([a-z])/g, (_m, letter) => letter.toUpperCase());
+    return Boolean(node.dataset) && node.dataset[key] !== undefined;
+  }
+  const wanted = selector.replace(/^\./, '');
+  return typeof node.className === 'string' && node.className.split(/\s+/).includes(wanted);
+}
+
+function descendants(root, selector) {
+  const found = [];
+  const walk = (node) => {
+    for (const child of node.children || []) {
+      if (matchesSelector(child, selector)) found.push(child);
+      walk(child);
+    }
+  };
+  walk(root);
+  return found;
+}
+
 function createElement(tag = 'div') {
   const element = {
     tagName: String(tag).toUpperCase(),
@@ -62,8 +88,12 @@ function createElement(tag = 'div') {
     click() {},
     scrollIntoView() {},
     getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; },
-    querySelector() { return createElement(); },
-    querySelectorAll() { return []; },
+    querySelector(selector) {
+      return descendants(element, selector)[0] || null;
+    },
+    querySelectorAll(selector) {
+      return descendants(element, selector);
+    },
     closest() { return null; }
   };
   return element;
@@ -72,6 +102,7 @@ function createElement(tag = 'div') {
 function createHarness() {
   const registry = new Map();
   const requested = [];
+  const bodies = [];
   const errors = [];
   const elements = {
     '#notice': createElement(),
@@ -90,7 +121,12 @@ function createHarness() {
       if (!registry.has(selector)) registry.set(selector, elements[selector] || createElement());
       return registry.get(selector);
     },
-    querySelectorAll: () => [],
+    querySelectorAll(selector) {
+      if (selector === '.working-day:checked') {
+        return [1, 2, 3, 4, 5].map((day) => Object.assign(createElement('input'), { value: String(day), checked: true }));
+      }
+      return [];
+    },
     getElementById: (id) => document.querySelector(`#${id}`),
     createElement,
     createElementNS: (_namespace, tag) => createElement(tag),
@@ -105,15 +141,26 @@ function createHarness() {
     '/api/dashboard/session': { authenticated: false },
     '/api/dashboard/settings': {
       doctorName: 'Dr. Haider', clinicName: 'Apna city clinic', email: 'haider@example.test',
-      religion: 'Muslim', basicCheckupFee: 500, consultationDetails: '', facilitiesList: [],
-      servicesList: [], facilityPricing: [], workingDays: [1, 2, 3, 4, 5], offDays: [],
-      religiousHolidayOpenDays: [], religiousHolidays: [], welcomeMessage: '', setupComplete: false,
+      religion: 'Muslim', basicCheckupFee: 500, consultationDetails: 'Consultation charges Rs. 1500',
+      facilitiesList: ['Clinical pathology', 'Hemoglobin', 'Investigation'], servicesList: [],
+      facilityPricing: [
+        { category: 'facility', name: 'Clinical pathology', price: 700 },
+        { category: 'facility', name: 'Hemoglobin', price: 700 },
+        { category: 'facility', name: 'Investigation', price: 700 }
+      ],
+      workingDays: [1, 2, 3, 4, 5], offDays: [],
+      religiousHolidayOpenDays: [], religiousHolidays: [],
+      welcomeMessage: 'Assalam-o-Alaikum! Welcome to our clinic', setupComplete: false,
       appointmentLookaheadDays: 14, reportTime: '07:30'
     }
   };
-  const fetchStub = async (url) => {
+  const fetchStub = async (url, options = {}) => {
     const path_ = String(url).split('?')[0];
     requested.push(path_);
+    if (options.body) {
+      try { bodies.push({ path: path_, method: options.method, payload: JSON.parse(options.body) }); }
+      catch { bodies.push({ path: path_, method: options.method, payload: null }); }
+    }
     if (responses[path_] === undefined) {
       errors.push(`unexpected request ${path_}`);
       return { ok: false, status: 404, json: async () => ({ error: 'not stubbed' }) };
@@ -143,7 +190,7 @@ function createHarness() {
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   const context = vm.createContext(sandbox);
-  return { context, requested, errors, responses };
+  return { context, requested, errors, responses, bodies, document };
 }
 
 // Calling a function with no arguments exercises its body far enough to resolve
@@ -184,6 +231,47 @@ async function renderAs(session) {
 
 async function main() {
   const failures = [];
+
+  // Regression: the priced-item rows were rendered without the class the save
+  // handler queries, so every clinic setup save submitted an empty list and the
+  // server rejected it with "add at least one facility or treatment" even though
+  // rows were visible on screen.
+  const submit = await renderAs({
+    role: 'DOCTOR', doctorId: 'clinic-one', doctorName: 'Dr. Haider', clinicName: 'Apna city clinic'
+  });
+  if (submit.failure.message) failures.push(`doctor session failed to render -> ${submit.failure.message}`);
+  const pricingRows = submit.document.querySelector('#facility-pricing-list').children;
+  if (pricingRows.length !== 3) {
+    failures.push(`expected 3 priced rows to render, found ${pricingRows.length}`);
+  }
+  const form = submit.document.querySelector('#doctor-settings-form');
+  if (typeof form.handlers.submit !== 'function') {
+    failures.push('the clinic setup form has no submit handler');
+  } else {
+    await form.handlers.submit({ preventDefault() {} });
+    for (let tick = 0; tick < 6; tick += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    const save = submit.bodies.find((body) => body.method === 'PUT');
+    if (!save) {
+      failures.push('submitting the clinic setup form never sent a save request');
+    } else {
+      const pricing = save.payload?.facilityPricing;
+      if (!Array.isArray(pricing) || pricing.length !== 3) {
+        failures.push(`save sent ${Array.isArray(pricing) ? pricing.length : 'no'} priced items, expected 3 `
+          + '-> the form would be rejected as having nothing to save');
+      } else {
+        const names = pricing.map((item) => item.name);
+        for (const expectedName of ['Clinical pathology', 'Hemoglobin', 'Investigation']) {
+          if (!names.includes(expectedName)) failures.push(`save dropped the priced item ${expectedName}`);
+        }
+        if (pricing.some((item) => item.price !== 700 || item.category !== 'facility')) {
+          failures.push(`save sent wrong prices or categories -> ${JSON.stringify(pricing)}`);
+        }
+      }
+      if (save.payload?.reportTime !== '07:30') {
+        failures.push(`save lost the daily report time -> ${save.payload?.reportTime}`);
+      }
+    }
+  }
 
   const doctor = await renderAs({ role: 'DOCTOR', doctorId: 'clinic-one', doctorName: 'Dr. Haider', clinicName: 'Apna city clinic' });
   if (doctor.failure.message) {
@@ -227,8 +315,8 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`dashboard-runtime: doctor, superadmin and role-less sessions rendered, `
-    + `${doctor.requested.length + admin.requested.length + roleless.requested.length} requests verified, `
+  console.log(`dashboard-runtime: clinic setup save payload verified, `
+    + `doctor, superadmin and role-less sessions rendered, `
     + `${sweep.swept} functions swept for scope errors`);
 }
 

@@ -2399,7 +2399,7 @@ test('clinic setup reports which field is invalid', async () => {
 
     assert.equal((await send({ ...base, workingDays: [] })).body.error, 'Select at least one working day.');
     assert.equal((await send({ ...base, facilityPricing: [] })).body.error,
-      'Add at least one facility or treatment with a price.');
+      'Add at least one facility or treatment with a price, using the "Add facility or treatment" button.');
     assert.equal((await send({ ...base, officeStartHour: 18, officeEndHour: 9 })).body.error,
       'Check the clinic timings: closing time must be later than opening time, and bookings 1 to 30 days ahead.');
     assert.equal((await send({ ...base, basicCheckupFee: -5 })).body.error,
