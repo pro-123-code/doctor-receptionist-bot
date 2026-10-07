@@ -1428,6 +1428,7 @@ module.exports = {
   getGoogleCalendarOAuthStatus,
   mountDashboard,
   normalizeAdminDoctorPatch,
+  normalizeDoctorSettings,
   resolveGoogleRedirectUri,
   verifyGoogleOAuthState,
   verifySessionToken

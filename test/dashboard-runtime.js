@@ -7,6 +7,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { normalizeDoctorSettings } = require('../src/dashboard.js');
 
 const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'dashboard.html'), 'utf8');
 const inlineScripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map((match) => match[1]);
@@ -269,6 +270,17 @@ async function main() {
       }
       if (save.payload?.reportTime !== '07:30') {
         failures.push(`save lost the daily report time -> ${save.payload?.reportTime}`);
+      }
+      // The captured payload is the one the browser would really send, so running
+      // it through the server validator proves the two halves agree. A mismatch
+      // here is exactly what makes a form with visible items fail to save.
+      const verdict = normalizeDoctorSettings(save.payload);
+      if (verdict.error) {
+        failures.push(`the server rejects the payload the form sends -> ${verdict.error}`);
+      } else if (verdict.settings?.facilityPricing?.length !== 3) {
+        failures.push(`server kept ${verdict.settings?.facilityPricing?.length} priced items instead of 3`);
+      } else if (verdict.settings.setupComplete !== true) {
+        failures.push('the server did not mark the clinic setup complete');
       }
     }
   }
