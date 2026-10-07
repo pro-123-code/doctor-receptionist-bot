@@ -86,4 +86,35 @@ for (const endpoint of ['/api/dashboard/login', '/api/dashboard/logout', '/api/d
   }
 }
 
-console.log(`dashboard: ${requiredIds.length} elements, ${referenced.length} selectors and all endpoints verified`);
+// Every sidebar link must target an anchor that exists and must have a click
+// handler, otherwise the menu silently does nothing.
+const navLinks = [...html.matchAll(/<a[^>]*href="#([a-zA-Z0-9-]+)"[^>]*>/g)].map((match) => match[1]);
+for (const target of navLinks) {
+  if (!html.includes(`id="${target}"`)) {
+    console.error(`dashboard: nav link points at missing anchor #${target}`);
+    process.exit(1);
+  }
+}
+const navIds = [...html.matchAll(/<a[^>]*id="([a-z0-9-]+)"[^>]*href="#/g)].map((match) => match[1]);
+for (const id of navIds) {
+  const variable = id.replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+  const declared = new RegExp(`const ${variable} = document\\.querySelector\\('#${id}'\\)`).test(inline);
+  const handled = new RegExp(`${variable}\\.addEventListener\\('click'`).test(inline);
+  if (!declared || !handled) {
+    console.error(`dashboard: nav link #${id} is not wired up (declared=${declared}, clickHandler=${handled})`);
+    process.exit(1);
+  }
+}
+
+// Role-dependent navigation must be recomputed, not left at its markup default.
+if (!/function updateNavVisibility\(\)/.test(inline)) {
+  console.error('dashboard: role-aware navigation helper is missing');
+  process.exit(1);
+}
+if (!/navAppointments\.hidden = isSuperadmin/.test(inline)) {
+  console.error('dashboard: superadmin still sees doctor-only navigation');
+  process.exit(1);
+}
+
+console.log(`dashboard: ${requiredIds.length} elements, ${referenced.length} selectors, `
+  + `${navLinks.length} nav anchors, ${navIds.length} nav handlers and all endpoints verified`);

@@ -111,13 +111,13 @@
           </div>
         </div>
         <nav class="flex-1 px-3 py-5 space-y-1 overflow-y-auto" aria-label="Sections">
-          <a class="navlink" href="#appointments-anchor">
+          <a id="nav-appointments" class="navlink" href="#appointments-anchor">
             <span class="h-1.5 w-1.5 rounded-full bg-brand-500"></span>Appointments
           </a>
-          <a class="navlink" href="#clinic-timings-anchor">
+          <a id="nav-clinic-setup" class="navlink" href="#clinic-timings-anchor">
             <span class="h-1.5 w-1.5 rounded-full bg-sky-500"></span>Clinic setup
           </a>
-          <a class="navlink" href="#connections-anchor">
+          <a id="nav-connections" class="navlink" href="#connections-anchor">
             <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Connections
           </a>
           <a id="admin-nav-link" class="navlink" href="#admin-doctors-anchor" hidden>
@@ -441,6 +441,9 @@
     const brandMobile = document.querySelector('#brand-mobile');
     const adminNavLink = document.querySelector('#admin-nav-link');
     const adminNavCreate = document.querySelector('#admin-nav-create');
+    const navAppointments = document.querySelector('#nav-appointments');
+    const navClinicSetup = document.querySelector('#nav-clinic-setup');
+    const navConnections = document.querySelector('#nav-connections');
     const statToday = document.querySelector('#stat-today');
     const statTodayLabel = document.querySelector('#stat-today-label');
     const statHours = document.querySelector('#stat-hours');
@@ -467,6 +470,53 @@
     let clinicSetupComplete = false;
     let editingClinicSetup = false;
     let editingAdminDoctorId = null;
+    let currentRole = null;
+
+    // Only show navigation that resolves to something actually on screen: the
+    // doctor sections are hidden from a superadmin, and the appointments and
+    // connections panels are hidden while the clinic setup form is open.
+    function updateNavVisibility() {
+      const isSuperadmin = currentRole === 'SUPERADMIN';
+      const onAdminList = isSuperadmin && !editingAdminDoctorId;
+      navAppointments.hidden = isSuperadmin;
+      navConnections.hidden = isSuperadmin;
+      navClinicSetup.hidden = onAdminList;
+      adminNavLink.hidden = !onAdminList;
+      adminNavCreate.hidden = !onAdminList;
+    }
+
+    function scrollToSection(element) {
+      if (!element || element.hidden) return false;
+      element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return true;
+    }
+
+    navAppointments.addEventListener('click', (event) => {
+      event.preventDefault();
+      scrollToSection(document.querySelector('#appointments-anchor'));
+    });
+    adminNavLink.addEventListener('click', (event) => {
+      event.preventDefault();
+      scrollToSection(document.querySelector('#admin-doctors-anchor'));
+    });
+    adminNavCreate.addEventListener('click', (event) => {
+      event.preventDefault();
+      scrollToSection(document.querySelector('#admin-create-anchor'));
+    });
+    navConnections.addEventListener('click', (event) => {
+      event.preventDefault();
+      scrollToSection(document.querySelector('#connections-anchor'));
+    });
+    navClinicSetup.addEventListener('click', (event) => {
+      event.preventDefault();
+      if (navClinicSetup.hidden) return;
+      if (currentRole === 'SUPERADMIN' && !editingAdminDoctorId) return;
+      if (setupPanel.hidden) {
+        editClinicSetupButton.click();
+      } else {
+        scrollToSection(document.querySelector('#clinic-timings-anchor'));
+      }
+    });
 
     function showError(message) {
       notice.className = 'mb-6 rounded-xl border px-4 py-3 text-sm font-semibold bg-rose-50 border-rose-200 text-rose-800';
@@ -481,9 +531,10 @@
       adminSection.hidden = session.role !== 'SUPERADMIN';
       logoutButton.hidden = false;
       appShell.hidden = false;
-      const isSuperadmin = session.role === 'SUPERADMIN';
-      adminNavLink.hidden = !isSuperadmin;
-      adminNavCreate.hidden = !isSuperadmin;
+      currentRole = session.role;
+      editingAdminDoctorId = null;
+      editingClinicSetup = false;
+      updateNavVisibility();
       const brand = session.role === 'DOCTOR'
         ? `${session.doctorName || 'Doctor'} | ${session.clinicName || 'Clinic'}`
         : 'DoctorBot | Superadmin';
@@ -732,11 +783,13 @@
         dashboardSection.hidden = false;
         adminSection.hidden = true;
         logoutButton.hidden = false;
+        updateNavVisibility();
         await loadDoctorSettings(`/api/admin/doctors/${encodeURIComponent(doctorId)}`);
       } catch (error) {
         editingAdminDoctorId = null;
         dashboardSection.hidden = true;
         adminSection.hidden = false;
+        updateNavVisibility();
         showError(error.message);
       }
     }
@@ -1110,6 +1163,7 @@
           editingClinicSetup = false;
           dashboardSection.hidden = true;
           adminSection.hidden = false;
+          updateNavVisibility();
           await loadDoctors();
           return;
         }
@@ -1189,6 +1243,7 @@
         editingClinicSetup = false;
         dashboardSection.hidden = true;
         adminSection.hidden = false;
+        updateNavVisibility();
         await loadDoctors();
         return;
       }
