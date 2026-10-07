@@ -131,6 +131,8 @@ mountDashboard(app, Appointment, timeZone, doctorId, {
   startWhatsAppConnection: connectDoctorWhatsApp,
   getWhatsAppConnectionStatus,
   getWhatsAppSessionInfo: getBaileysSessionInfo,
+  listWhatsAppStatuses: () => [...whatsappConnectionStates.entries()]
+    .map(([doctorId, state]) => ({ doctorId, status: state.status })),
   syncReligiousHolidays: syncDoctorReligiousHolidays
 });
 

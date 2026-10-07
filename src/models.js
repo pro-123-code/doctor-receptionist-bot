@@ -424,6 +424,7 @@ async function deleteConversation(senderJid, doctorId = process.env.DOCTOR_ID ||
 
 module.exports = {
   Appointment,
+  DailyReportRun,
   InboundMessage,
   InboundQueueLock,
   claimDailyReportRun,

@@ -79,9 +79,34 @@ if (dangling.length) {
 for (const endpoint of ['/api/dashboard/login', '/api/dashboard/logout', '/api/dashboard/session',
   '/api/dashboard/appointments', '/api/dashboard/settings', '/api/dashboard/whatsapp/status',
   '/api/dashboard/whatsapp/connect', '/api/dashboard/calendar/status', '/api/dashboard/calendar/settings',
-  '/api/dashboard/calendar/disconnect', '/api/admin/doctors']) {
+  '/api/dashboard/calendar/disconnect', '/api/admin/doctors',
+  '/api/admin/overview', '/api/admin/appointments', '/api/admin/analytics', '/api/admin/system',
+  '/api/admin/service-logs']) {
   if (!inline.includes(endpoint)) {
     console.error(`dashboard: script no longer calls ${endpoint}`);
+    process.exit(1);
+  }
+}
+
+// Every admin panel and route must be real: implemented on the server, behind the
+// superadmin guard, and reachable from the sidebar.
+const serverSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'dashboard.js'), 'utf8');
+for (const match of serverSource.matchAll(/app\.(get|post|put|patch)\('(\/api\/admin\/[^']*)',\s*([^)]*)\)/g)) {
+  const [, , route, guards] = match;
+  if (!/requireDashboardAuth/.test(guards) || !/requireSuperadmin/.test(guards)) {
+    console.error(`server: ${route} is missing superadmin authorization`);
+    process.exit(1);
+  }
+}
+const adminRoutes = [...serverSource.matchAll(/app\.(get|post|put|patch)\('\/api\/admin\//g)].length;
+if (adminRoutes < 8) {
+  console.error(`server: expected a full control panel, found only ${adminRoutes} admin routes`);
+  process.exit(1);
+}
+for (const anchor of ['admin-overview-anchor', 'admin-appointments-anchor', 'admin-analytics-anchor',
+  'admin-system-anchor', 'admin-doctors-anchor', 'admin-create-anchor']) {
+  if (!html.includes(`id="${anchor}"`)) {
+    console.error(`dashboard: admin panel ${anchor} is missing`);
     process.exit(1);
   }
 }
@@ -117,4 +142,5 @@ if (!/navAppointments\.hidden = isSuperadmin/.test(inline)) {
 }
 
 console.log(`dashboard: ${requiredIds.length} elements, ${referenced.length} selectors, `
-  + `${navLinks.length} nav anchors, ${navIds.length} nav handlers and all endpoints verified`);
+  + `${navLinks.length} nav anchors, ${navIds.length} nav handlers, `
+  + `${adminRoutes} guarded admin routes and all endpoints verified`);

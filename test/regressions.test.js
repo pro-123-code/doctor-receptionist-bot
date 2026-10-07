@@ -2445,3 +2445,202 @@ test('clinic setup reports which field is invalid', async () => {
     else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
   }
 });
+test('superadmin overview, analytics, system and logs endpoints serve real data', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'admin-panel-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const Appointment = mongoose.models.Appointment;
+  const InboundMessage = mongoose.models.InboundMessage;
+  const ServiceLog = mongoose.models.ServiceLog;
+
+  const originals = {
+    dashboardFindById: DashboardUser.findById,
+    doctorFind: Doctor.find,
+    doctorCount: Doctor.countDocuments,
+    doctorExists: Doctor.exists,
+    appointmentFind: Appointment.find,
+    appointmentCount: Appointment.countDocuments,
+    appointmentDistinct: Appointment.distinct,
+    appointmentAggregate: Appointment.aggregate,
+    inboundCount: InboundMessage.countDocuments,
+    inboundAggregate: InboundMessage.aggregate,
+    serviceCount: ServiceLog.countDocuments,
+    serviceFind: ServiceLog.find,
+    serviceAggregate: ServiceLog.aggregate,
+    reportFind: mongoose.models.DailyReportRun.find
+  };
+
+  const admin = { _id: 'admin-panel-user', role: 'SUPERADMIN', doctorId: null, isActive: true };
+  const doctorRows = [
+    { doctorId: 'clinic-one', doctorName: 'Dr. One', clinicName: 'Clinic One', email: 'one@example.test', isActive: true, setupComplete: true, googleCalendarConnected: true },
+    { doctorId: 'clinic-two', doctorName: 'Dr. Two', clinicName: 'Clinic Two', email: 'two@example.test', isActive: false, setupComplete: false, googleCalendarConnected: false }
+  ];
+  const appointmentRows = [
+    { _id: 'a1', doctorId: 'clinic-one', senderJid: 'p1@s.whatsapp.net', details: { name: 'Ada', contactNumber: '+923001' }, slotStart: new Date('2026-10-08T05:00:00Z'), slotEnd: new Date('2026-10-08T05:30:00Z'), bookedAt: new Date(), status: 'booked' }
+  ];
+
+  const leanResult = (rows) => {
+    const chain = {
+      sort() { return chain; },
+      select() { return chain; },
+      limit() { return chain; },
+      lean: async () => rows
+    };
+    return chain;
+  };
+  DashboardUser.findById = () => ({ lean: async () => admin });
+  Doctor.find = (filter) => {
+    if (filter && filter.select) return leanResult(doctorRows.map(({ doctorId, isActive, setupComplete, googleCalendarConnected }) => ({ doctorId, isActive, setupComplete, googleCalendarConnected })));
+    return leanResult(doctorRows);
+  };
+  Doctor.countDocuments = async () => 2;
+  Doctor.exists = async () => true;
+  Appointment.find = () => leanResult(appointmentRows);
+  Appointment.countDocuments = async () => 1;
+  Appointment.distinct = async () => ['p1@s.whatsapp.net'];
+  Appointment.aggregate = async (pipeline) => (pipeline.some((stage) => stage.$dateToString)
+    ? [{ _id: '2026-10-07', appointments: 3 }]
+    : [{ _id: 'clinic-one', total: 5, upcoming: 2, inPeriod: 3, lastBookedAt: new Date() }]);
+  InboundMessage.countDocuments = async () => 12;
+  InboundMessage.aggregate = async () => [{ _id: 'clinic-one', messages: 12, voice: 2 }];
+  ServiceLog.countDocuments = async () => 1;
+  ServiceLog.find = () => leanResult([{ _id: 'l1', doctorId: 'clinic-one', level: 'error', event: 'Calendar booking', code: 'X', createdAt: new Date() }]);
+  ServiceLog.aggregate = async () => [{ _id: { doctorId: 'clinic-one', level: 'error' }, count: 1 }];
+  mongoose.models.DailyReportRun.find = () => ({ select() { return this; }, limit() { return this; }, lean: async () => [] });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, Appointment, 'Asia/Karachi', 'clinic-one', {
+      getWhatsAppSessionInfo: () => ({ authDirectory: '/data/sessions', persistent: true, notice: null }),
+      listWhatsAppStatuses: () => [{ doctorId: 'clinic-one', status: 'connected' }]
+    });
+    const token = createSessionToken(admin, secret, Date.now() + 60_000);
+    const request = { headers: { cookie: `doctorbot_dashboard=${token}` }, query: {}, params: {} };
+    const makeResponse = () => ({
+      locals: {}, statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; }
+    });
+
+    // Admin routes chain requireDashboardAuth, requireSuperadmin, then the handler,
+// so every handler in the chain must run.
+    const call = async (route, query = {}) => {
+      const response = makeResponse();
+      const handlers = routes.get(route);
+      request.query = query;
+      for (let index = 0; index < handlers.length; index += 1) {
+        const isLast = index === handlers.length - 1;
+        await handlers[index](request, response, () => {});
+        if (isLast) break;
+        if (response.statusCode >= 400) break;
+      }
+      return response;
+    };
+
+    const overview = await call('GET /api/admin/overview');
+    assert.equal(overview.statusCode, 200);
+    assert.equal(overview.body.doctors.total, 2);
+    assert.equal(overview.body.appointments.total, 1);
+    assert.equal(overview.body.appointments.uniquePatients, 1);
+    assert.equal(overview.body.messaging.receivedLast24Hours, 12);
+
+    const appointments = await call('GET /api/admin/appointments', { limit: '10', doctorId: 'clinic-one', q: 'Ada' });
+    assert.equal(appointments.statusCode, 200);
+    assert.equal(appointments.body.appointments.length, 1);
+    assert.equal(appointments.body.appointments[0].clinicName, 'Clinic One', 'must resolve the clinic name');
+    assert.equal(appointments.body.timeZone, 'Asia/Karachi');
+
+    const badDoctor = await call('GET /api/admin/appointments', { doctorId: '../etc/passwd' });
+    assert.equal(badDoctor.statusCode, 400, 'must reject a non-slug doctorId');
+
+    const analytics = await call('GET /api/admin/analytics', { days: '14' });
+    assert.equal(analytics.statusCode, 200);
+    assert.equal(analytics.body.dailyBookings.length, 1);
+    assert.equal(analytics.body.doctors.length, 2, 'must include clinics with no activity');
+    const clinicOne = analytics.body.doctors.find((row) => row.doctorId === 'clinic-one');
+    assert.equal(clinicOne.totalAppointments, 5);
+    assert.equal(clinicOne.messagesReceived, 12);
+    assert.equal(clinicOne.errors, 1);
+
+    const system = await call('GET /api/admin/system');
+    assert.equal(system.statusCode, 200);
+    assert.equal(system.body.runtime.timeZone, 'Asia/Karachi');
+    assert.equal(system.body.whatsapp.sessionPersistent, true);
+    assert.equal(system.body.whatsapp.connections.length, 1);
+    assert.equal(system.body.clinics.length, 2);
+    assert.equal(Object.keys(system.body.configuration).some((key) => /password|secret|key$/i.test(key) && system.body.configuration[key]), false,
+      'configuration must never expose secrets');
+
+    const logs = await call('GET /api/admin/service-logs', { level: 'error' });
+    assert.equal(logs.statusCode, 200);
+    assert.equal(logs.body.logs[0].doctorName, 'Dr. One');
+  } finally {
+    DashboardUser.findById = originals.dashboardFindById;
+    Doctor.find = originals.doctorFind;
+    Doctor.countDocuments = originals.doctorCount;
+    Doctor.exists = originals.doctorExists;
+    Appointment.find = originals.appointmentFind;
+    Appointment.countDocuments = originals.appointmentCount;
+    Appointment.distinct = originals.appointmentDistinct;
+    Appointment.aggregate = originals.appointmentAggregate;
+    InboundMessage.countDocuments = originals.inboundCount;
+    InboundMessage.aggregate = originals.inboundAggregate;
+    ServiceLog.countDocuments = originals.serviceCount;
+    ServiceLog.find = originals.serviceFind;
+    ServiceLog.aggregate = originals.serviceAggregate;
+    mongoose.models.DailyReportRun.find = originals.reportFind;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
+test('doctor accounts cannot reach any superadmin control panel endpoint', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'admin-guard-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originalFindById = DashboardUser.findById;
+  const originalDoctorFindOne = Doctor.findOne;
+  const doctor = { _id: 'doctor-user', role: 'DOCTOR', doctorId: 'clinic-one', isActive: true };
+  DashboardUser.findById = () => ({ lean: async () => doctor });
+  Doctor.findOne = () => ({ select: () => ({ lean: async () => ({ doctorId: doctor.doctorId, isActive: true }) }), lean: async () => ({ doctorId: doctor.doctorId, isActive: true }) });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
+      post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
+      put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+    };
+    mountDashboard(app, {}, 'Asia/Karachi', doctor.doctorId);
+    const token = createSessionToken(doctor, secret, Date.now() + 60_000);
+    const request = { headers: { cookie: `doctorbot_dashboard=${token}` }, query: {}, params: {} };
+
+    for (const route of ['GET /api/admin/overview', 'GET /api/admin/appointments',
+      'GET /api/admin/analytics', 'GET /api/admin/system', 'GET /api/admin/service-logs',
+      'GET /api/admin/doctors']) {
+      const response = { locals: {}, statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; } };
+      const handlers = routes.get(route);
+      await handlers[0](request, response, () => {});
+      handlers[1](request, response, () => {});
+      assert.equal(response.statusCode, 403, `${route} must reject a doctor session`);
+    }
+  } finally {
+    DashboardUser.findById = originalFindById;
+    Doctor.findOne = originalDoctorFindOne;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});

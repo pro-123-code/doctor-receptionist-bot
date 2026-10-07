@@ -1,8 +1,9 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
+const mongoose = require('mongoose');
 const { google } = require('googleapis');
 const { getLocalDateParts, getLocalDayBounds } = require('./dateParser');
-const { DashboardUser, Doctor, consumeDashboardLoginAttempt } = require('./models');
+const { DashboardUser, DailyReportRun, Doctor, InboundMessage, ServiceLog, consumeDashboardLoginAttempt } = require('./models');
 const { hashPassword, verifyPassword } = require('./passwords');
 const { encryptJson, hasValidEncryptionKey } = require('./secretBox');
 const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
@@ -130,6 +131,28 @@ function isValidDateKey(value) {
   const [year, month, day] = value.split('-').map(Number);
   const date = new Date(Date.UTC(year, month - 1, day));
   return date.getUTCFullYear() === year && date.getUTCMonth() + 1 === month && date.getUTCDate() === day;
+}
+
+function isValidDoctorSlug(value) {
+  return /^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(String(value || ''));
+}
+
+function clampInteger(value, { min, max, fallback }) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+// Search terms reach a Mongo regex, so user input must never be treated as a pattern.
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function maskDatabaseUri(uri) {
+  if (typeof uri !== 'string' || !uri.includes('@')) return null;
+  const [, rest] = uri.split('@');
+  const host = rest.split('/')[0];
+  return `${host.split(':')[0]}`;
 }
 
 function formatClinicDateKey(dateParts) {
@@ -1068,6 +1091,304 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     } catch (error) {
       console.error(`Doctor account update failed (${error?.name || 'Error'})`);
       response.status(503).json({ error: 'Doctor account could not be updated.' });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Super Admin control panel. Every route below requires the SUPERADMIN role.
+  // ---------------------------------------------------------------------------
+
+  async function loadDoctorDirectory() {
+    const doctors = await Doctor.find({}).sort({ createdAt: -1 }).lean();
+    return new Map(doctors.map((doctor) => [doctor.doctorId, doctor]));
+  }
+
+  app.get('/api/admin/overview', requireDashboardAuth, requireSuperadmin, async (_request, response) => {
+    try {
+      const now = new Date();
+      const todayBounds = getLocalDayBounds(getLocalDateParts(now, timeZone), timeZone);
+      const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+      const [
+        doctorCount, activeDoctorCount, setupPendingCount,
+        totalAppointments, upcomingAppointments, todayAppointments, last30DaysAppointments,
+        uniquePatients, messagesLast24h, errorsLast30Days, warningsLast30Days,
+        reportRuns
+      ] = await Promise.all([
+        Doctor.countDocuments({}),
+        Doctor.countDocuments({ isActive: true }),
+        Doctor.countDocuments({ setupComplete: { $ne: true } }),
+        Appointment.countDocuments({ status: 'booked' }),
+        Appointment.countDocuments({ status: 'booked', slotStart: { $gt: now } }),
+        Appointment.countDocuments({ status: 'booked', slotStart: { $gte: todayBounds.start, $lt: todayBounds.end } }),
+        Appointment.countDocuments({ status: 'booked', bookedAt: { $gte: thirtyDaysAgo } }),
+        Appointment.distinct('senderJid', { status: 'booked' }).then((values) => values.length),
+        InboundMessage.countDocuments({ receivedAt: { $gte: dayAgo } }),
+        ServiceLog.countDocuments({ level: 'error', createdAt: { $gte: thirtyDaysAgo } }),
+        ServiceLog.countDocuments({ level: 'warn', createdAt: { $gte: thirtyDaysAgo } }),
+        DailyReportRun.find({ status: 'failed', lockExpiresAt: { $gte: thirtyDaysAgo } })
+          .select('doctorId dateKey').limit(50).lean()
+      ]);
+
+      const reportFailuresByDoctor = {};
+      for (const run of reportRuns) {
+        reportFailuresByDoctor[run.doctorId] = (reportFailuresByDoctor[run.doctorId] || 0) + 1;
+      }
+
+      response.json({
+        generatedAt: now.toISOString(),
+        timeZone,
+        doctors: { total: doctorCount, active: activeDoctorCount, setupPending: setupPendingCount },
+        appointments: {
+          total: totalAppointments,
+          upcoming: upcomingAppointments,
+          today: todayAppointments,
+          last30Days: last30DaysAppointments,
+          uniquePatients
+        },
+        messaging: { receivedLast24Hours: messagesLast24h },
+        operations: { errorsLast30Days, warningsLast30Days, failedDailyReports: reportRuns.length, reportFailuresByDoctor }
+      });
+    } catch (error) {
+      console.error(`Admin overview failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Platform overview is temporarily unavailable' });
+    }
+  });
+
+  app.get('/api/admin/appointments', requireDashboardAuth, requireSuperadmin, async (request, response) => {
+    const limit = clampInteger(request.query.limit, { min: 1, max: 200, fallback: 50 });
+    const filter = { status: 'booked' };
+    if (isValidDoctorSlug(request.query.doctorId)) {
+      filter.doctorId = request.query.doctorId;
+    } else if (request.query.doctorId) {
+      return response.status(400).json({ error: 'doctorId is not a valid clinic id' });
+    }
+    if (isValidDateKey(request.query.from) || isValidDateKey(request.query.to)) {
+      filter.slotStart = {};
+      if (isValidDateKey(request.query.from)) {
+        filter.slotStart.$gte = getLocalDayBounds({
+          year: Number(request.query.from.slice(0, 4)),
+          month: Number(request.query.from.slice(5, 7)),
+          day: Number(request.query.from.slice(8, 10))
+        }, timeZone).start;
+      }
+      if (isValidDateKey(request.query.to)) {
+        filter.slotStart.$lt = getLocalDayBounds({
+          year: Number(request.query.to.slice(0, 4)),
+          month: Number(request.query.to.slice(5, 7)),
+          day: Number(request.query.to.slice(8, 10))
+        }, timeZone).end;
+      }
+    }
+    if (request.query.upcoming === 'true') filter.slotStart = { ...(filter.slotStart || {}), $gt: new Date() };
+
+    const search = typeof request.query.q === 'string' ? request.query.q.trim().slice(0, 60) : '';
+    if (search) {
+      const pattern = new RegExp(escapeRegExp(search), 'i');
+      filter.$or = [{ 'details.name': pattern }, { 'details.contactNumber': pattern }, { senderJid: pattern }];
+    }
+
+    try {
+      const [appointments, total, directory] = await Promise.all([
+        Appointment.find(filter).sort({ slotStart: -1 }).limit(limit).lean(),
+        Appointment.countDocuments(filter),
+        loadDoctorDirectory()
+      ]);
+      response.json({
+        total,
+        limit,
+        timeZone,
+        appointments: appointments.map((appointment) => {
+          const doctor = directory.get(appointment.doctorId);
+          return {
+            id: String(appointment._id),
+            doctorId: appointment.doctorId,
+            doctorName: doctor?.doctorName || appointment.doctorId,
+            clinicName: doctor?.clinicName || null,
+            patientName: appointment.details?.name || '',
+            whatsAppNumber: appointment.details?.contactNumber || '',
+            symptoms: appointment.details?.majorSymptoms || '',
+            slotStart: appointment.slotStart,
+            slotEnd: appointment.slotEnd,
+            bookedAt: appointment.bookedAt || null,
+            status: appointment.status
+          };
+        })
+      });
+    } catch (error) {
+      console.error(`Admin appointments failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Appointments are temporarily unavailable' });
+    }
+  });
+
+  app.get('/api/admin/analytics', requireDashboardAuth, requireSuperadmin, async (request, response) => {
+    const days = clampInteger(request.query.days, { min: 7, max: 90, fallback: 14 });
+    try {
+      const now = new Date();
+      const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+
+      const [daily, perDoctor, directory, messageTotals, errorTotals] = await Promise.all([
+        Appointment.aggregate([
+          { $match: { status: 'booked', bookedAt: { $gte: since } } },
+          { $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$bookedAt', timezone: timeZone } },
+            appointments: { $sum: 1 }
+          } },
+          { $sort: { _id: 1 } }
+        ]),
+        Appointment.aggregate([
+          { $match: { status: 'booked' } },
+          { $group: {
+            _id: '$doctorId',
+            total: { $sum: 1 },
+            upcoming: { $sum: { $cond: [{ $gt: ['$slotStart', now] }, 1, 0] } },
+            inPeriod: { $sum: { $cond: [{ $gte: ['$bookedAt', since] }, 1, 0] } },
+            lastBookedAt: { $max: '$bookedAt' }
+          } }
+        ]),
+        loadDoctorDirectory(),
+        InboundMessage.aggregate([
+          { $match: { receivedAt: { $gte: since } } },
+          { $group: { _id: '$doctorId', messages: { $sum: 1 }, voice: { $sum: { $cond: [{ $eq: ['$messageType', 'audio'] }, 1, 0] } } } }
+        ]),
+        ServiceLog.aggregate([
+          { $match: { createdAt: { $gte: since } } },
+          { $group: { _id: { doctorId: '$doctorId', level: '$level' }, count: { $sum: 1 } } }
+        ])
+      ]);
+
+      const doctorRows = [...directory.values()].map((doctor) => ({ doctor, metrics: null }));
+      const byDoctorId = new Map(doctorRows.map((row) => [row.doctor.doctorId, row]));
+      for (const entry of perDoctor) {
+        const row = byDoctorId.get(entry._id);
+        if (row) row.metrics = entry;
+      }
+      const messagesByDoctor = new Map(messageTotals.map((entry) => [entry._id, entry]));
+      const errorsByDoctor = new Map();
+      for (const entry of errorTotals) {
+        errorsByDoctor.set(entry._id.doctorId, {
+          ...(errorsByDoctor.get(entry._id.doctorId) || {}),
+          [entry._id.level]: entry.count
+        });
+      }
+
+      response.json({
+        generatedAt: now.toISOString(),
+        days,
+        since: since.toISOString(),
+        timeZone,
+        dailyBookings: daily.map((entry) => ({ date: entry._id, appointments: entry.appointments })),
+        doctors: doctorRows.map(({ doctor, metrics }) => {
+          const messages = messagesByDoctor.get(doctor.doctorId);
+          const problems = errorsByDoctor.get(doctor.doctorId);
+          return {
+            doctorId: doctor.doctorId,
+            doctorName: doctor.doctorName,
+            clinicName: doctor.clinicName,
+            email: doctor.email,
+            isActive: doctor.isActive !== false,
+            setupComplete: doctor.setupComplete === true,
+            googleCalendarConnected: doctor.googleCalendarConnected === true,
+            totalAppointments: metrics?.total || 0,
+            upcomingAppointments: metrics?.upcoming || 0,
+            periodAppointments: metrics?.inPeriod || 0,
+            lastBookedAt: metrics?.lastBookedAt || null,
+            messagesReceived: messages?.messages || 0,
+            voiceMessages: messages?.voice || 0,
+            errors: problems?.error || 0,
+            warnings: problems?.warn || 0
+          };
+        })
+      });
+    } catch (error) {
+      console.error(`Admin analytics failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Analytics are temporarily unavailable' });
+    }
+  });
+
+  app.get('/api/admin/system', requireDashboardAuth, requireSuperadmin, async (request, response) => {
+    try {
+      const memory = process.memoryUsage();
+      const sessionInfo = typeof whatsappConnection.getWhatsAppSessionInfo === 'function'
+        ? whatsappConnection.getWhatsAppSessionInfo()
+        : {};
+      const connectionStatuses = typeof whatsappConnection.listWhatsAppStatuses === 'function'
+        ? whatsappConnection.listWhatsAppStatuses()
+        : [];
+      const oauthStatus = getGoogleCalendarOAuthStatus(request);
+
+      const doctorStatuses = await Doctor.find({}).select('doctorId googleCalendarConnected isActive setupComplete').lean();
+
+      response.json({
+        runtime: {
+          nodeVersion: process.version,
+          platform: process.platform,
+          uptimeSeconds: Math.round(process.uptime()),
+          memoryRoundedMb: Math.round(memory.rss / 1024 / 1024),
+          heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
+          timeZone
+        },
+        configuration: {
+          nodeEnv: process.env.NODE_ENV || 'development',
+          port: Number(process.env.PORT) || 3000,
+          trustProxy: process.env.TRUST_PROXY === 'true',
+          databaseConnected: mongoose.connection.readyState === 1,
+          databaseHost: maskDatabaseUri(process.env.MONGODB_URI),
+          geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+          geminiPatientDataAllowed: process.env.GEMINI_ALLOW_PHI_PROCESSING === 'true',
+          voiceTranscriptionEnabled: process.env.OPENAI_ALLOW_PHI_PROCESSING === 'true' && Boolean(process.env.OPENAI_API_KEY),
+          googleClientConfigured: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+          googleRedirectUri: oauthStatus.redirectUri,
+          googleRedirectUriValid: oauthStatus.available,
+          smtpConfigured: Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS),
+          emailFromConfigured: Boolean(process.env.EMAIL_FROM)
+        },
+        whatsapp: {
+          authDirectory: sessionInfo.authDirectory || null,
+          sessionPersistent: sessionInfo.persistent !== false,
+          sessionNotice: sessionInfo.notice || null,
+          connections: connectionStatuses
+        },
+        clinics: doctorStatuses.map((doctor) => ({
+          doctorId: doctor.doctorId,
+          isActive: doctor.isActive !== false,
+          setupComplete: doctor.setupComplete === true,
+          googleCalendarConnected: doctor.googleCalendarConnected === true
+        }))
+      });
+    } catch (error) {
+      console.error(`Admin system status failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'System status is temporarily unavailable' });
+    }
+  });
+
+  app.get('/api/admin/service-logs', requireDashboardAuth, requireSuperadmin, async (request, response) => {
+    const limit = clampInteger(request.query.limit, { min: 1, max: 200, fallback: 50 });
+    const filter = {};
+    if (['error', 'warn', 'info'].includes(request.query.level)) filter.level = request.query.level;
+    if (isValidDoctorSlug(request.query.doctorId)) filter.doctorId = request.query.doctorId;
+
+    try {
+      const [logs, directory] = await Promise.all([
+        ServiceLog.find(filter).sort({ createdAt: -1 }).limit(limit).lean(),
+        loadDoctorDirectory()
+      ]);
+      response.json({
+        timeZone,
+        logs: logs.map((log) => ({
+          id: String(log._id),
+          doctorId: log.doctorId,
+          doctorName: directory.get(log.doctorId)?.doctorName || log.doctorId,
+          level: log.level,
+          event: log.event,
+          code: log.code || null,
+          createdAt: log.createdAt
+        }))
+      });
+    } catch (error) {
+      console.error(`Admin service logs failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Service logs are temporarily unavailable' });
     }
   });
 }

@@ -123,8 +123,20 @@
           <a id="admin-nav-link" class="navlink" href="#admin-doctors-anchor" hidden>
             <span class="h-1.5 w-1.5 rounded-full bg-violet-500"></span>Doctor accounts
           </a>
+          <a id="admin-nav-overview" class="navlink" href="#admin-overview-anchor" hidden>
+            <span class="h-1.5 w-1.5 rounded-full bg-brand-500"></span>Overview
+          </a>
+          <a id="admin-nav-appointments" class="navlink" href="#admin-appointments-anchor" hidden>
+            <span class="h-1.5 w-1.5 rounded-full bg-sky-500"></span>All appointments
+          </a>
+          <a id="admin-nav-analytics" class="navlink" href="#admin-analytics-anchor" hidden>
+            <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>Usage &amp; analytics
+          </a>
+          <a id="admin-nav-system" class="navlink" href="#admin-system-anchor" hidden>
+            <span class="h-1.5 w-1.5 rounded-full bg-rose-500"></span>System status
+          </a>
           <a id="admin-nav-create" class="navlink" href="#admin-create-anchor" hidden>
-            <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>Add a doctor
+            <span class="h-1.5 w-1.5 rounded-full bg-teal-500"></span>Add a doctor
           </a>
         </nav>
         <div class="p-4 border-t border-slate-100">
@@ -391,6 +403,132 @@
     </section>
 
     <section id="admin-dashboard" class="space-y-6" hidden>
+      <section id="admin-overview-anchor" class="scroll-mt-24" aria-labelledby="admin-overview-title">
+        <div class="flex flex-wrap items-end justify-between gap-3 mb-4">
+          <div>
+            <p class="eyebrow">Platform</p>
+            <h1 id="admin-overview-title" class="mt-1 text-2xl font-extrabold tracking-tight text-slate-900">Overview</h1>
+          </div>
+          <button id="admin-overview-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+        </div>
+        <div id="admin-overview-cards" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"></div>
+        <div id="admin-overview-alerts" class="mt-4 space-y-3"></div>
+      </section>
+
+      <section id="admin-appointments-anchor" class="surface scroll-mt-24" aria-labelledby="admin-appointments-title">
+        <div class="p-5 sm:p-6 border-b border-slate-100">
+          <h2 id="admin-appointments-title" class="text-xl font-extrabold text-slate-900">All appointments</h2>
+          <p class="hint mt-1">Every booked appointment across all clinics.</p>
+          <form id="admin-appointments-form" class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5 items-end">
+            <div>
+              <label class="label" for="admin-filter-doctor">Clinic</label>
+              <select id="admin-filter-doctor" class="field"></select>
+            </div>
+            <div>
+              <label class="label" for="admin-filter-from">From</label>
+              <input id="admin-filter-from" class="field" type="date">
+            </div>
+            <div>
+              <label class="label" for="admin-filter-to">To</label>
+              <input id="admin-filter-to" class="field" type="date">
+            </div>
+            <div>
+              <label class="label" for="admin-filter-q">Search patient</label>
+              <input id="admin-filter-q" class="field" type="search" placeholder="Name or number">
+            </div>
+            <div class="flex gap-2">
+              <button class="btn btn-primary" type="submit">Filter</button>
+              <button id="admin-appointments-reset" class="btn btn-ghost" type="button">Reset</button>
+            </div>
+          </form>
+          <label class="mt-3 inline-flex items-center gap-2 text-sm font-medium text-slate-700">
+            <input id="admin-filter-upcoming" type="checkbox" class="form-check-input">
+            Upcoming only
+          </label>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="data">
+            <thead>
+              <tr><th>Patient</th><th>Clinic</th><th>WhatsApp</th><th>Slot</th><th>Booked</th></tr>
+            </thead>
+            <tbody id="admin-appointments"></tbody>
+          </table>
+        </div>
+        <div class="px-5 sm:px-6 py-3 border-t border-slate-100">
+          <p id="admin-appointments-count" class="hint" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <section id="admin-analytics-anchor" class="surface scroll-mt-24" aria-labelledby="admin-analytics-title">
+        <div class="flex flex-wrap items-end justify-between gap-3 p-5 sm:p-6 border-b border-slate-100">
+          <div>
+            <h2 id="admin-analytics-title" class="text-xl font-extrabold text-slate-900">Usage &amp; analytics</h2>
+            <p class="hint mt-1">Resource consumption and booking volume per clinic.</p>
+          </div>
+          <div class="flex items-end gap-2">
+            <div>
+              <label class="label" for="admin-analytics-days">Window</label>
+              <select id="admin-analytics-days" class="field">
+                <option value="7">Last 7 days</option>
+                <option value="14" selected>Last 14 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="90">Last 90 days</option>
+              </select>
+            </div>
+            <button id="admin-analytics-refresh" class="btn btn-ghost" type="button">Refresh</button>
+          </div>
+        </div>
+        <div class="p-5 sm:p-6 border-b border-slate-100">
+          <p class="label">Bookings per day</p>
+          <div id="admin-analytics-chart" class="flex items-end gap-2 h-40 mt-2" role="img" aria-label="Bookings per day chart"></div>
+          <p id="admin-analytics-chart-empty" class="hint mt-2" hidden>No bookings recorded in this window.</p>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="data">
+            <thead>
+              <tr><th>Clinic</th><th>Bookings</th><th>Window</th><th>Upcoming</th><th>Messages</th><th>Voice</th><th>Errors</th></tr>
+            </thead>
+            <tbody id="admin-analytics"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="admin-system-anchor" class="surface scroll-mt-24" aria-labelledby="admin-system-title">
+        <div class="flex flex-wrap items-end justify-between gap-3 p-5 sm:p-6 border-b border-slate-100">
+          <div>
+            <h2 id="admin-system-title" class="text-xl font-extrabold text-slate-900">System status</h2>
+            <p class="hint mt-1">Runtime health and integration readiness. Secrets are never shown.</p>
+          </div>
+          <button id="admin-system-refresh" class="btn btn-ghost" type="button">Refresh</button>
+        </div>
+        <div id="admin-system-body" class="p-5 sm:p-6 grid gap-6 lg:grid-cols-2"></div>
+        <div class="border-t border-slate-100">
+          <div class="p-5 sm:p-6">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <h3 class="text-sm font-bold text-slate-900">Operational logs</h3>
+              <div class="flex items-center gap-2">
+                <select id="admin-logs-level" class="field !w-auto">
+                  <option value="">All levels</option>
+                  <option value="error">Errors</option>
+                  <option value="warn">Warnings</option>
+                  <option value="info">Info</option>
+                </select>
+                <button id="admin-logs-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+              </div>
+            </div>
+            <div class="mt-3 overflow-x-auto">
+              <table class="data">
+                <thead>
+                  <tr><th>When</th><th>Level</th><th>Clinic</th><th>Event</th><th>Code</th></tr>
+                </thead>
+                <tbody id="admin-logs"></tbody>
+              </table>
+            </div>
+            <p id="admin-logs-empty" class="hint mt-3" hidden>No operational events recorded.</p>
+          </div>
+        </div>
+      </section>
+
       <section id="admin-doctors-anchor" class="surface scroll-mt-24" aria-labelledby="admin-title">
         <div class="flex flex-wrap items-end justify-between gap-4 p-5 sm:p-6 border-b border-slate-100">
           <div>
@@ -444,6 +582,21 @@
     const navAppointments = document.querySelector('#nav-appointments');
     const navClinicSetup = document.querySelector('#nav-clinic-setup');
     const navConnections = document.querySelector('#nav-connections');
+    const adminNavOverview = document.querySelector('#admin-nav-overview');
+    const adminNavAppointments = document.querySelector('#admin-nav-appointments');
+    const adminNavAnalytics = document.querySelector('#admin-nav-analytics');
+    const adminNavSystem = document.querySelector('#admin-nav-system');
+    const adminOverviewCards = document.querySelector('#admin-overview-cards');
+    const adminOverviewAlerts = document.querySelector('#admin-overview-alerts');
+    const adminAppointmentsBody = document.querySelector('#admin-appointments');
+    const adminAppointmentsCount = document.querySelector('#admin-appointments-count');
+    const adminFilterDoctor = document.querySelector('#admin-filter-doctor');
+    const adminAnalyticsBody = document.querySelector('#admin-analytics');
+    const adminAnalyticsChart = document.querySelector('#admin-analytics-chart');
+    const adminAnalyticsDays = document.querySelector('#admin-analytics-days');
+    const adminSystemBody = document.querySelector('#admin-system-body');
+    const adminLogsBody = document.querySelector('#admin-logs');
+    const adminLogsEmpty = document.querySelector('#admin-logs-empty');
     const statToday = document.querySelector('#stat-today');
     const statTodayLabel = document.querySelector('#stat-today-label');
     const statHours = document.querySelector('#stat-hours');
@@ -483,12 +636,252 @@
       navClinicSetup.hidden = onAdminList;
       adminNavLink.hidden = !onAdminList;
       adminNavCreate.hidden = !onAdminList;
+      adminNavOverview.hidden = !onAdminList;
+      adminNavAppointments.hidden = !onAdminList;
+      adminNavAnalytics.hidden = !onAdminList;
+      adminNavSystem.hidden = !onAdminList;
+    }
+
+    function adminNavClick(event, targetId) {
+      event.preventDefault();
+      scrollToSection(document.querySelector(`#${targetId}`));
     }
 
     function scrollToSection(element) {
       if (!element || element.hidden) return false;
       element.scrollIntoView({ behavior: 'smooth', block: 'start' });
       return true;
+    }
+
+    async function adminFetch(path, options = {}) {
+      const response = await fetch(path, { credentials: 'same-origin', ...options });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || 'Could not load this section.');
+      }
+      return response.json();
+    }
+
+    function statCard(label, value, caption) {
+      const card = document.createElement('div');
+      card.className = 'surface p-5 transition-shadow duration-200 hover:shadow-lift';
+      const labelNode = document.createElement('p');
+      labelNode.className = 'eyebrow';
+      labelNode.textContent = label;
+      const valueNode = document.createElement('p');
+      valueNode.className = 'mt-2 text-3xl font-extrabold text-slate-900';
+      valueNode.textContent = value;
+      const captionNode = document.createElement('p');
+      captionNode.className = 'hint mt-1';
+      captionNode.textContent = caption;
+      card.append(labelNode, valueNode, captionNode);
+      return card;
+    }
+
+    async function loadAdminOverview() {
+      const data = await adminFetch('/api/admin/overview');
+      adminOverviewCards.replaceChildren(
+        statCard('Clinics', String(data.doctors.total), `${data.doctors.active} active · ${data.doctors.setupPending} awaiting setup`),
+        statCard('Appointments', String(data.appointments.total), `${data.appointments.last30Days} in the last 30 days`),
+        statCard('Upcoming', String(data.appointments.upcoming), `${data.appointments.today} today`),
+        statCard('Patients', String(data.appointments.uniquePatients), 'unique WhatsApp numbers')
+      );
+      adminOverviewAlerts.replaceChildren();
+      const alerts = [];
+      if (data.messaging.receivedLast24Hours) {
+        alerts.push(`WhatsApp received ${data.messaging.receivedLast24Hours} message(s) in the last 24 hours.`);
+      }
+      if (data.operations.errorsLast30Days) {
+        alerts.push(`${data.operations.errorsLast30Days} operational error(s) and ${data.operations.warningsLast30Days} warning(s) in the last 30 days.`);
+      }
+      if (data.operations.failedDailyReports) {
+        alerts.push(`${data.operations.failedDailyReports} daily appointment report(s) failed to send.`);
+      }
+      if (!alerts.length) alerts.push('No operational problems detected in the last 30 days.');
+      for (const message of alerts) {
+        const note = document.createElement('p');
+        note.className = 'hint rounded-xl border border-slate-200 bg-white px-4 py-3';
+        note.textContent = message;
+        adminOverviewAlerts.append(note);
+      }
+      return data;
+    }
+
+    function fillClinicFilter(doctors) {
+      const previous = adminFilterDoctor.value;
+      adminFilterDoctor.replaceChildren(new Option('All clinics', ''));
+      for (const doctor of doctors) {
+        adminFilterDoctor.append(new Option(`${doctor.doctorName} — ${doctor.clinicName}`, doctor.doctorId));
+      }
+      if (previous && [...adminFilterDoctor.options].some((option) => option.value === previous)) {
+        adminFilterDoctor.value = previous;
+      }
+    }
+
+    async function loadAdminAppointments() {
+      const query = new URLSearchParams({ limit: '100' });
+      if (adminFilterDoctor.value) query.set('doctorId', adminFilterDoctor.value);
+      if (document.querySelector('#admin-filter-from').value) query.set('from', document.querySelector('#admin-filter-from').value);
+      if (document.querySelector('#admin-filter-to').value) query.set('to', document.querySelector('#admin-filter-to').value);
+      if (document.querySelector('#admin-filter-q').value.trim()) query.set('q', document.querySelector('#admin-filter-q').value.trim());
+      if (document.querySelector('#admin-filter-upcoming').checked) query.set('upcoming', 'true');
+
+      const data = await adminFetch(`/api/admin/appointments?${query.toString()}`);
+      adminAppointmentsBody.replaceChildren();
+      const formatter = new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'medium', timeStyle: 'short', timeZone: data.timeZone
+      });
+      for (const appointment of data.appointments) {
+        const row = document.createElement('tr');
+        const cells = [
+          appointment.patientName || '—',
+          appointment.clinicName || appointment.doctorId,
+          appointment.whatsAppNumber || '—',
+          formatter.format(new Date(appointment.slotStart)),
+          appointment.bookedAt ? formatter.format(new Date(appointment.bookedAt)) : '—'
+        ];
+        cells.forEach((value, index) => {
+          const cell = document.createElement('td');
+          cell.textContent = value;
+          if (index === 0) cell.className = 'font-semibold text-slate-900';
+          row.append(cell);
+        });
+        adminAppointmentsBody.append(row);
+      }
+      adminAppointmentsCount.textContent = `Showing ${data.appointments.length} of ${data.total} matching appointment(s).`;
+      return data;
+    }
+
+    async function loadAdminAnalytics() {
+      const data = await adminFetch(`/api/admin/analytics?days=${encodeURIComponent(adminAnalyticsDays.value)}`);
+      const peak = Math.max(1, ...data.dailyBookings.map((entry) => entry.appointments));
+      adminAnalyticsChart.replaceChildren();
+      for (const entry of data.dailyBookings) {
+        const column = document.createElement('div');
+        column.className = 'flex-1 flex flex-col items-center justify-end gap-1 min-w-[14px]';
+        const bar = document.createElement('div');
+        bar.className = 'w-full rounded-t-md bg-brand-500 hover:bg-brand-600 transition-colors';
+        bar.style.height = `${Math.round((entry.appointments / peak) * 120)}px`;
+        bar.title = `${entry.date}: ${entry.appointments}`;
+        const label = document.createElement('span');
+        label.className = 'text-[10px] text-slate-500';
+        label.textContent = entry.date.slice(5);
+        column.append(bar, label);
+        adminAnalyticsChart.append(column);
+      }
+      document.querySelector('#admin-analytics-chart-empty').hidden = data.dailyBookings.length > 0;
+
+      adminAnalyticsBody.replaceChildren();
+      for (const row of data.doctors) {
+        const tr = document.createElement('tr');
+        const cells = [
+          `${row.doctorName} — ${row.clinicName}`,
+          row.totalAppointments, row.periodAppointments, row.upcomingAppointments,
+          row.messagesReceived, row.voiceMessages, row.errors
+        ];
+        cells.forEach((value, index) => {
+          const cell = document.createElement('td');
+          cell.textContent = String(value);
+          if (index === 0) cell.className = 'font-semibold text-slate-900';
+          if (index === 6 && Number(value) > 0) cell.className = 'font-semibold text-rose-600';
+          tr.append(cell);
+        });
+        adminAnalyticsBody.append(tr);
+      }
+      return data;
+    }
+
+    function systemList(title, entries) {
+      const wrapper = document.createElement('div');
+      const heading = document.createElement('h3');
+      heading.className = 'text-sm font-bold text-slate-900';
+      heading.textContent = title;
+      const list = document.createElement('dl');
+      list.className = 'mt-3 space-y-2';
+      for (const [label, value, tone] of entries) {
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between gap-3 text-sm';
+        const term = document.createElement('dt');
+        term.className = 'text-ink-soft';
+        term.textContent = label;
+        const definition = document.createElement('dd');
+        const chip = document.createElement('span');
+        chip.className = tone === 'good'
+          ? 'chip chip-teal'
+          : tone === 'warn' ? 'chip chip-amber' : 'chip !bg-slate-100 !text-slate-600 !border-slate-200';
+        chip.textContent = String(value);
+        definition.append(chip);
+        row.append(term, definition);
+        list.append(row);
+      }
+      wrapper.append(heading, list);
+      return wrapper;
+    }
+
+    async function loadAdminSystem() {
+      const [system, logs] = await Promise.all([
+        adminFetch('/api/admin/system'),
+        adminFetch(`/api/admin/service-logs?limit=50${document.querySelector('#admin-logs-level').value ? `&level=${document.querySelector('#admin-logs-level').value}` : ''}`)
+      ]);
+      adminSystemBody.replaceChildren(
+        systemList('Runtime', [
+          ['Node.js', system.runtime.nodeVersion],
+          ['Uptime', `${Math.floor(system.runtime.uptimeSeconds / 60)} min`],
+          ['Memory in use', `${system.runtime.memoryRoundedMb} MB`],
+          ['Time zone', system.runtime.timeZone]
+        ]),
+        systemList('Configuration', [
+          ['Environment', system.configuration.nodeEnv],
+          ['Database', system.configuration.databaseConnected ? 'Connected' : 'Down', system.configuration.databaseConnected ? 'good' : 'warn'],
+          ['Database host', system.configuration.databaseHost || 'unknown'],
+          ['Google Calendar OAuth', system.configuration.googleRedirectUriValid ? 'Ready' : 'Not ready', system.configuration.googleRedirectUriValid ? 'good' : 'warn'],
+          ['Voice transcription', system.configuration.voiceTranscriptionEnabled ? 'Enabled' : 'Disabled', system.configuration.voiceTranscriptionEnabled ? 'good' : 'warn'],
+          ['Gemini extraction', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'Enabled' : 'Disabled', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'good' : 'warn'],
+          ['Daily email reports', system.configuration.smtpConfigured ? 'Configured' : 'Not configured', system.configuration.smtpConfigured ? 'good' : 'warn'],
+          ['WhatsApp sessions persist', system.whatsapp.sessionPersistent ? 'Persistent' : 'Ephemeral', system.whatsapp.sessionPersistent ? 'good' : 'warn']
+        ])
+      );
+
+      adminLogsBody.replaceChildren();
+      for (const log of logs.logs) {
+        const row = document.createElement('tr');
+        const when = document.createElement('td');
+        when.className = 'whitespace-nowrap text-ink-soft';
+        when.textContent = new Date(log.createdAt).toLocaleString();
+        const level = document.createElement('td');
+        const chip = document.createElement('span');
+        chip.className = log.level === 'error' ? 'chip !bg-rose-50 !text-rose-700 !border-rose-200'
+          : log.level === 'warn' ? 'chip chip-amber' : 'chip !bg-slate-100 !text-slate-600 !border-slate-200';
+        chip.textContent = log.level;
+        level.append(chip);
+        const doctor = document.createElement('td');
+        doctor.textContent = log.doctorName;
+        const event = document.createElement('td');
+        event.textContent = log.event;
+        const code = document.createElement('td');
+        code.className = 'text-ink-soft';
+        code.textContent = log.code || '—';
+        row.append(when, level, doctor, event, code);
+        adminLogsBody.append(row);
+      }
+      adminLogsEmpty.hidden = logs.logs.length > 0;
+      return system;
+    }
+
+    async function loadAdminPanels() {
+      try {
+        const overview = await loadAdminOverview();
+        const doctors = await loadDoctors();
+        fillClinicFilter(doctors.map((doctor) => ({ doctorId: doctor.doctorId, doctorName: doctor.doctorName, clinicName: doctor.clinicName })));
+        await Promise.all([
+          loadAdminAppointments().catch((error) => showError(error.message)),
+          loadAdminAnalytics().catch((error) => showError(error.message)),
+          loadAdminSystem().catch((error) => showError(error.message))
+        ]);
+        return overview;
+      } catch (error) {
+        showError(error.message);
+      }
     }
 
     navAppointments.addEventListener('click', (event) => {
@@ -503,6 +896,10 @@
       event.preventDefault();
       scrollToSection(document.querySelector('#admin-create-anchor'));
     });
+    adminNavOverview.addEventListener('click', (event) => adminNavClick(event, 'admin-overview-anchor'));
+    adminNavAppointments.addEventListener('click', (event) => adminNavClick(event, 'admin-appointments-anchor'));
+    adminNavAnalytics.addEventListener('click', (event) => adminNavClick(event, 'admin-analytics-anchor'));
+    adminNavSystem.addEventListener('click', (event) => adminNavClick(event, 'admin-system-anchor'));
     navConnections.addEventListener('click', (event) => {
       event.preventDefault();
       scrollToSection(document.querySelector('#connections-anchor'));
@@ -551,6 +948,7 @@
         }).catch((error) => showError(error.message));
       } else if (session.role === 'SUPERADMIN') {
         loadDoctors().catch((error) => showError(error.message));
+        loadAdminPanels();
       }
     }
 
@@ -1272,6 +1670,40 @@
     });
     document.querySelector('#admin-refresh').addEventListener('click', () => {
       loadDoctors().catch((error) => showError(error.message));
+      loadAdminPanels();
+    });
+    document.querySelector('#admin-overview-refresh').addEventListener('click', () => {
+      loadAdminOverview().catch((error) => showError(error.message));
+    });
+    document.querySelector('#admin-analytics-refresh').addEventListener('click', () => {
+      loadAdminAnalytics().catch((error) => showError(error.message));
+    });
+    document.querySelector('#admin-system-refresh').addEventListener('click', () => {
+      loadAdminSystem().catch((error) => showError(error.message));
+    });
+    document.querySelector('#admin-logs-refresh').addEventListener('click', () => {
+      loadAdminSystem().catch((error) => showError(error.message));
+    });
+    document.querySelector('#admin-logs-level').addEventListener('change', () => {
+      loadAdminSystem().catch((error) => showError(error.message));
+    });
+    document.querySelector('#admin-filter-upcoming').addEventListener('change', () => {
+      loadAdminAppointments().catch((error) => showError(error.message));
+    });
+    document.querySelector('#admin-appointments-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      loadAdminAppointments().catch((error) => showError(error.message));
+    });
+    document.querySelector('#admin-appointments-reset').addEventListener('click', () => {
+      document.querySelector('#admin-filter-from').value = '';
+      document.querySelector('#admin-filter-to').value = '';
+      document.querySelector('#admin-filter-q').value = '';
+      document.querySelector('#admin-filter-upcoming').checked = false;
+      adminFilterDoctor.value = '';
+      loadAdminAppointments().catch((error) => showError(error.message));
+    });
+    adminAnalyticsDays.addEventListener('change', () => {
+      loadAdminAnalytics().catch((error) => showError(error.message));
     });
     document.querySelector('#create-doctor-form').addEventListener('submit', async (event) => {
       event.preventDefault();
