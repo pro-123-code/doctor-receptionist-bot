@@ -9,7 +9,8 @@ const { encryptJson, hasValidEncryptionKey } = require('./secretBox');
 const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
 const { getReligiousHolidays } = require('./clinicSchedule');
 const { isValidRupeeAmount, normalizeFacilityPricing } = require('./facilityPricing');
-const { normalizeClinicTimingInput, resolveClinicTiming } = require('./clinicTiming');
+const { diagnoseVoicePipeline } = require('./voiceTranscription');
+const { normalizeClinicTimingInput, normalizeReportTime, resolveClinicTiming } = require('./clinicTiming');
 const { verifyDoctorCalendarAccess } = require('./calendarAccess');
 
 const cookieName = 'doctorbot_dashboard';
@@ -121,7 +122,7 @@ async function requireDashboardAuth(request, response, next) {
 
 function requireSuperadmin(request, response, next) {
   if (response.locals.dashboardUser?.role !== 'SUPERADMIN') {
-    return response.status(403).json({ error: 'Superadmin access required' });
+    return response.status(403).json({ error: 'Superadmin access required for this section' });
   }
   next();
 }
@@ -368,6 +369,11 @@ function normalizeAdminDoctorPatch(body = {}, existingDoctor = {}) {
     });
     if (!timingPatch) return null;
     Object.assign(patch, timingPatch);
+  }
+  if (body.reportTime !== undefined) {
+    const reportTime = normalizeReportTime(body.reportTime);
+    if (!reportTime) return null;
+    patch.reportTime = reportTime;
   }
   if (body.offDays !== undefined) {
     const normalizedOffDays = normalizeOffDays(body.offDays);
@@ -628,9 +634,12 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
 
   app.get('/api/dashboard/session', requireDashboardAuth, (_request, response) => {
     const user = response.locals.dashboardUser;
+    // Role is always explicit in the session payload so the dashboard never has to
+    // infer superadmin access from an optional field that may be absent.
     response.json({
       authenticated: true,
-      role: user.role,
+      role: user.role || 'DOCTOR',
+      isSuperAdmin: user.role === 'SUPERADMIN',
       doctorId: user.doctorId || null,
       doctorName: response.locals.doctor?.doctorName || null,
       clinicName: response.locals.doctor?.clinicName || null
@@ -692,6 +701,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       offDays: doctor.offDays || [],
       religiousHolidayOpenDays: doctor.religiousHolidayOpenDays || [],
       ...resolveClinicTiming(doctor),
+      reportTime: normalizeReportTime(doctor.reportTime),
       religiousHolidays: [...new Set([currentDate.year, currentDate.year + 1])]
         .flatMap((year) => getReligiousHolidays(previewReligion, year))
         .filter(({ date }) => date >= currentDateKey),
@@ -876,6 +886,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         workingDays: updatedDoctor.workingDays,
         offDays: updatedDoctor.offDays,
         ...resolveClinicTiming(updatedDoctor),
+        reportTime: normalizeReportTime(updatedDoctor.reportTime),
         religion: updatedDoctor.religion,
         setupComplete: updatedDoctor.setupComplete,
         welcomeMessage: updatedDoctor.welcomeMessage,
@@ -906,7 +917,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       ]);
       const countByDoctor = new Map(counts.map((entry) => [entry._id, entry]));
       response.json({ doctors: doctors.map(({
-        doctorId, doctorName, clinicName, email, isActive, createdAt, setupComplete, googleCalendarConnected
+        doctorId, doctorName, clinicName, email, isActive, createdAt, setupComplete, googleCalendarConnected, reportTime
       }) => ({
         doctorId,
         doctorName,
@@ -915,6 +926,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         isActive,
         setupComplete: setupComplete === true,
         googleCalendarConnected: googleCalendarConnected === true,
+        reportTime: normalizeReportTime(reportTime),
         createdAt,
         ...(countByDoctor.get(doctorId) || { totalAppointments: 0, upcomingAppointments: 0 })
       })) });
@@ -948,6 +960,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         offDays: doctor.offDays || [],
         religiousHolidayOpenDays: doctor.religiousHolidayOpenDays || [],
         ...resolveClinicTiming(doctor),
+        reportTime: normalizeReportTime(doctor.reportTime),
         religiousHolidays: [...new Set([currentDate.year, currentDate.year + 1])]
           .flatMap((year) => getReligiousHolidays(previewReligion, year))
           .filter(({ date }) => date >= currentDateKey),
@@ -1360,6 +1373,21 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     } catch (error) {
       console.error(`Admin system status failed (${error?.name || 'Error'})`);
       response.status(503).json({ error: 'System status is temporarily unavailable' });
+    }
+  });
+
+  app.post('/api/admin/diagnostics/voice', requireDashboardAuth, requireSuperadmin, async (_request, response) => {
+    try {
+      const result = await diagnoseVoicePipeline();
+      response.json({
+        ready: result.ready,
+        stages: result.stages,
+        model: process.env.OPENAI_TRANSCRIPTION_MODEL || 'whisper-1',
+        timeZone
+      });
+    } catch (error) {
+      console.error(`Voice diagnostics failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Voice diagnostics could not run' });
     }
   });
 

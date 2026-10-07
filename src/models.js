@@ -145,6 +145,9 @@ const doctorSchema = new Schema({
   officeEndHour: { type: Number, min: 1, max: 24 },
   appointmentDurationMinutes: { type: Number, min: 15, max: 240 },
   appointmentLookaheadDays: { type: Number, min: 1, max: 30 },
+  // Local HH:MM at which this clinic wants its daily appointment report emailed.
+  // Defaults to midnight, matching the previous fixed schedule.
+  reportTime: { type: String, match: /^([01]\d|2[0-3]):[0-5]\d$/, default: '00:00' },
   offDays: { type: [String], default: [] },
   religiousHolidayOpenDays: { type: [String], default: [] },
   religion: { type: String, enum: ['Christian', 'Muslim', 'Hindu', 'Other'], default: 'Other' },

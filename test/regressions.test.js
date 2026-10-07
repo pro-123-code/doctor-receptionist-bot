@@ -21,10 +21,10 @@ const { hashPassword, verifyPassword } = require('../src/passwords');
 const { decryptJson, encryptJson, hasValidEncryptionKey } = require('../src/secretBox');
 const { buildSystemInstruction } = require('../src/gemini');
 const { resolveGoogleCredentials, verifyDoctorCalendarAccess } = require('../src/calendarAccess');
-const { startDailyReport } = require('../src/cronJobs');
+const { createMailTransport, dispatchDoctorDailyReport, startDailyReportScheduler } = require('../src/cronJobs');
 const { privacyPolicy, termsOfService } = require('../src/legalPages');
 const { buildOfferOrder, formatSlotOffer, getSlotLocalDateKey, getZonedDateParts, isMoreSlotRequest, paginateSlots } = require('../src/slotOffers');
-const { normalizeClinicTimingInput, resolveClinicTiming } = require('../src/clinicTiming');
+const { currentLocalTime, isReportDueNow, normalizeClinicTimingInput, normalizeReportTime, resolveClinicTiming } = require('../src/clinicTiming');
 
 require('../src/models');
 
@@ -528,26 +528,18 @@ test('Google OAuth redirect URI must exactly match the callback route', () => {
   }), null);
 });
 
-test('daily report cron remains scheduled when SMTP is not configured', () => {
-  const settingNames = ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM', 'DAILY_REPORT_CRON'];
+test('the scheduler stays usable when SMTP is not configured', () => {
+  const settingNames = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM'];
   const previousSettings = Object.fromEntries(settingNames.map((name) => [name, process.env[name]]));
-  const originalSchedule = cron.schedule;
-  let scheduledJob;
   for (const name of settingNames) process.env[name] = '';
-  cron.schedule = (expression, callback, options) => {
-    scheduledJob = { expression, callback, options };
-    return { stop() {} };
-  };
-
   try {
-    const task = startDailyReport({ doctorId: 'report-test-clinic', email: 'doctor@example.test' });
-    assert.ok(task);
-    assert.ok(scheduledJob);
-    assert.equal(scheduledJob.expression, '0 0 * * *');
-    assert.equal(scheduledJob.options.timezone, 'Asia/Karachi');
-    assert.equal(scheduledJob.options.noOverlap, true);
+    const context = createMailTransport();
+    assert.equal(context.transport, null, 'a missing SMTP config must not create a transporter');
+    assert.match(context.reason, /missing SMTP settings/);
+    Object.assign(process.env, { SMTP_HOST: 'smtp.example.test', SMTP_USER: 'u', SMTP_PASS: 'p', EMAIL_FROM: 'e' });
+    process.env.SMTP_PORT = 'not-a-port';
+    assert.match(createMailTransport().reason, /SMTP_PORT/);
   } finally {
-    cron.schedule = originalSchedule;
     for (const name of settingNames) {
       if (previousSettings[name] === undefined) delete process.env[name];
       else process.env[name] = previousSettings[name];
@@ -555,9 +547,7 @@ test('daily report cron remains scheduled when SMTP is not configured', () => {
   }
 });
 
-test('midnight report filters booked appointments in the next 24 hours per doctor', async () => {
-  const settingNames = ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM', 'DAILY_REPORT_CRON'];
-  const previousSettings = Object.fromEntries(settingNames.map((name) => [name, process.env[name]]));
+test('the daily report selects booked appointments in the next 24 hours per doctor', async () => {
   const Doctor = mongoose.models.Doctor;
   const Appointment = mongoose.models.Appointment;
   const DailyReportRun = mongoose.models.DailyReportRun;
@@ -569,18 +559,10 @@ test('midnight report filters booked appointments in the next 24 hours per docto
     reportFindOneAndUpdate: DailyReportRun.findOneAndUpdate,
     reportCreate: DailyReportRun.create,
     reportUpdateOne: DailyReportRun.updateOne,
-    serviceLogCreate: ServiceLog.create,
-    schedule: cron.schedule
+    serviceLogCreate: ServiceLog.create
   };
-  let scheduledJob;
   let appointmentFilter;
   let completion;
-  for (const name of settingNames) process.env[name] = '';
-  process.env.DAILY_REPORT_CRON = '17 23 * * *';
-  cron.schedule = (expression, callback, options) => {
-    scheduledJob = { expression, callback, options };
-    return { stop() {} };
-  };
   Doctor.findOne = () => ({ lean: async () => ({
     doctorId: 'report-tenant', clinicName: 'Tenant Clinic', email: 'tenant@example.test', isActive: true
   }) });
@@ -598,9 +580,8 @@ test('midnight report filters booked appointments in the next 24 hours per docto
   ServiceLog.create = async () => ({});
 
   try {
-    startDailyReport({ doctorId: 'report-tenant' });
-    assert.equal(scheduledJob.expression, '0 0 * * *');
-    await scheduledJob.callback();
+    const result = await dispatchDoctorDailyReport({ doctorId: 'report-tenant' }, { transportContext: { transport: null, reason: 'missing SMTP settings' } });
+    assert.equal(result.sent, false);
     assert.equal(appointmentFilter.doctorId, 'report-tenant');
     assert.equal(appointmentFilter.status, 'booked');
     assert.equal(appointmentFilter.slotStart.$lt - appointmentFilter.slotStart.$gte, 24 * 60 * 60 * 1000);
@@ -615,18 +596,13 @@ test('midnight report filters booked appointments in the next 24 hours per docto
     DailyReportRun.create = originalMethods.reportCreate;
     DailyReportRun.updateOne = originalMethods.reportUpdateOne;
     ServiceLog.create = originalMethods.serviceLogCreate;
-    cron.schedule = originalMethods.schedule;
-    for (const name of settingNames) {
-      if (previousSettings[name] === undefined) delete process.env[name];
-      else process.env[name] = previousSettings[name];
-    }
   }
 });
 
-test('midnight report emails an Excel attachment to the current doctor profile', async () => {
+test('the daily report emails an Excel attachment to the current doctor profile', async () => {
   const settingNames = [
     'SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_REQUIRE_TLS', 'SMTP_USER',
-    'SMTP_PASS', 'EMAIL_FROM', 'DAILY_REPORT_CRON'
+    'SMTP_PASS', 'EMAIL_FROM'
   ];
   const previousSettings = Object.fromEntries(settingNames.map((name) => [name, process.env[name]]));
   const Doctor = mongoose.models.Doctor;
@@ -641,10 +617,8 @@ test('midnight report emails an Excel attachment to the current doctor profile',
     reportCreate: DailyReportRun.create,
     reportUpdateOne: DailyReportRun.updateOne,
     serviceLogCreate: ServiceLog.create,
-    createTransport: nodemailer.createTransport,
-    schedule: cron.schedule
+    createTransport: nodemailer.createTransport
   };
-  let scheduledJob;
   let sentMail;
   let completion;
   for (const name of settingNames) process.env[name] = '';
@@ -655,10 +629,6 @@ test('midnight report emails an Excel attachment to the current doctor profile',
     SMTP_PASS: 'smtp-password',
     EMAIL_FROM: 'reports@example.test'
   });
-  cron.schedule = (expression, callback, options) => {
-    scheduledJob = { expression, callback, options };
-    return { stop() {} };
-  };
   nodemailer.createTransport = (options) => ({
     options,
     async sendMail(message) { sentMail = message; return { messageId: 'test-report' }; }
@@ -685,9 +655,8 @@ test('midnight report emails an Excel attachment to the current doctor profile',
   ServiceLog.create = async () => ({});
 
   try {
-    startDailyReport({ doctorId: 'email-tenant', email: 'stale@example.test' });
-    assert.equal(scheduledJob.expression, '0 0 * * *');
-    await scheduledJob.callback();
+    const sent = await dispatchDoctorDailyReport({ doctorId: 'email-tenant', email: 'stale@example.test' });
+    assert.equal(sent.sent, true);
     assert.equal(sentMail.to, 'current@example.test');
     assert.equal(sentMail.from, 'reports@example.test');
     assert.match(sentMail.subject, /Email Clinic Daily Appointments/);
@@ -707,7 +676,6 @@ test('midnight report emails an Excel attachment to the current doctor profile',
     DailyReportRun.updateOne = originalMethods.reportUpdateOne;
     ServiceLog.create = originalMethods.serviceLogCreate;
     nodemailer.createTransport = originalMethods.createTransport;
-    cron.schedule = originalMethods.schedule;
     for (const name of settingNames) {
       if (previousSettings[name] === undefined) delete process.env[name];
       else process.env[name] = previousSettings[name];
@@ -2643,4 +2611,61 @@ test('doctor accounts cannot reach any superadmin control panel endpoint', async
     if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
     else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
   }
+});
+test('report time is validated, stored per clinic and returned to the dashboard', async () => {
+  assert.equal(normalizeReportTime('07:30'), '07:30');
+  assert.equal(normalizeReportTime(''), '00:00', 'blank falls back to midnight');
+  assert.equal(normalizeReportTime(undefined), '00:00');
+  assert.equal(normalizeReportTime('24:00'), null, '24:00 is not a valid 24-hour time');
+  assert.equal(normalizeReportTime('23:60'), null, 'minutes must stay under 60');
+  assert.equal(normalizeReportTime('7:30'), null, 'hours must be zero padded');
+  assert.equal(normalizeReportTime('07:30 PM'), null, 'a 12-hour suffix must be rejected');
+
+  assert.equal(currentLocalTime(new Date('2026-10-07T02:30:00Z'), 'Asia/Karachi'), '07:30');
+  assert.equal(isReportDueNow({ reportTime: '07:30' }, new Date('2026-10-07T02:30:00Z'), 'Asia/Karachi'), true);
+  assert.equal(isReportDueNow({ reportTime: '07:31' }, new Date('2026-10-07T02:30:00Z'), 'Asia/Karachi'), false);
+  assert.equal(isReportDueNow({}, new Date('2026-10-07T02:30:00Z'), 'Asia/Karachi'), false,
+    'a clinic without a saved time must not be due at an arbitrary minute');
+  assert.equal(isReportDueNow({ reportTime: '02:30' }, new Date('2026-10-07T02:30:00Z'), 'UTC'), true,
+    'the window must follow the configured time zone, not a hard-coded offset');
+  assert.equal(isReportDueNow({ reportTime: '07:30' }, new Date('2026-10-07T02:30:00Z'), 'UTC'), false);
+});
+
+test('the daily report scheduler dispatches only clinics that are due', async () => {
+  const dispatched = [];
+  const scheduler = startDailyReportScheduler({
+    timeZone: 'Asia/Karachi',
+    tickMs: 60_000,
+    now: () => new Date('2026-10-07T02:30:00Z'),
+    listDoctors: async () => [
+      { doctorId: 'due-clinic', reportTime: '07:30' },
+      { doctorId: 'other-minute', reportTime: '19:00' },
+      { doctorId: 'unset-clinic' },
+      { doctorId: null, reportTime: '07:30' }
+    ],
+    dispatch: (doctor) => {
+      dispatched.push(doctor.doctorId);
+      return Promise.resolve({ sent: true });
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  clearInterval(scheduler);
+  assert.deepEqual(dispatched, ['due-clinic'], 'only the clinic matching the current minute may run');
+});
+
+test('the daily report scheduler survives a database failure without stopping', async () => {
+  let attempts = 0;
+  const scheduler = startDailyReportScheduler({
+    timeZone: 'Asia/Karachi',
+    tickMs: 60_000,
+    now: () => new Date('2026-10-07T02:30:00Z'),
+    listDoctors: async () => {
+      attempts += 1;
+      throw new Error('database unavailable');
+    },
+    dispatch: () => Promise.resolve({ sent: true })
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  clearInterval(scheduler);
+  assert.equal(attempts, 1, 'a failed listing must not throw out of the tick');
 });

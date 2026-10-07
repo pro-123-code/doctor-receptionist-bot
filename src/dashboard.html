@@ -208,6 +208,10 @@
                 <label class="label" for="appointment-lookahead">Book up to (days)</label>
                 <input id="appointment-lookahead" class="field" type="number" min="1" max="30" step="1" required>
               </div>
+              <div>
+                <label class="label" for="clinic-report-time">Daily report time</label>
+                <input id="clinic-report-time" class="field" type="time" required>
+              </div>
             </div>
             <p id="timing-summary" class="hint mt-3"></p>
             <p id="timing-error" class="mt-1 text-sm font-semibold text-rose-600" hidden></p>
@@ -502,6 +506,13 @@
           <button id="admin-system-refresh" class="btn btn-ghost" type="button">Refresh</button>
         </div>
         <div id="admin-system-body" class="p-5 sm:p-6 grid gap-6 lg:grid-cols-2"></div>
+        <div class="px-5 sm:px-6 pb-5 sm:pb-6">
+          <div class="flex flex-wrap items-center gap-3">
+            <button id="admin-voice-test" class="btn btn-ghost btn-sm" type="button">Test voice transcription</button>
+            <p class="hint">Runs the WhatsApp audio pipeline with a generated tone, so you can see exactly which stage fails.</p>
+          </div>
+          <div id="admin-voice-result" class="mt-3 space-y-1 text-sm"></div>
+        </div>
         <div class="border-t border-slate-100">
           <div class="p-5 sm:p-6">
             <div class="flex flex-wrap items-center justify-between gap-3">
@@ -597,6 +608,8 @@
     const adminSystemBody = document.querySelector('#admin-system-body');
     const adminLogsBody = document.querySelector('#admin-logs');
     const adminLogsEmpty = document.querySelector('#admin-logs-empty');
+    const adminVoiceResult = document.querySelector('#admin-voice-result');
+    const adminVoiceTest = document.querySelector('#admin-voice-test');
     const statToday = document.querySelector('#stat-today');
     const statTodayLabel = document.querySelector('#stat-today-label');
     const statHours = document.querySelector('#stat-hours');
@@ -838,9 +851,32 @@
           ['Voice transcription', system.configuration.voiceTranscriptionEnabled ? 'Enabled' : 'Disabled', system.configuration.voiceTranscriptionEnabled ? 'good' : 'warn'],
           ['Gemini extraction', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'Enabled' : 'Disabled', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'good' : 'warn'],
           ['Daily email reports', system.configuration.smtpConfigured ? 'Configured' : 'Not configured', system.configuration.smtpConfigured ? 'good' : 'warn'],
-          ['WhatsApp sessions persist', system.whatsapp.sessionPersistent ? 'Persistent' : 'Ephemeral', system.whatsapp.sessionPersistent ? 'good' : 'warn']
+          ['WhatsApp sessions persist', system.whatsapp.sessionPersistent ? 'Persistent' : 'Ephemeral', system.whatsapp.sessionPersistent ? 'good' : 'warn'],
+          ['Voice pipeline', system.configuration.voiceTranscriptionEnabled ? 'Enabled' : 'Disabled', system.configuration.voiceTranscriptionEnabled ? 'good' : 'warn']
         ])
       );
+
+      const voiceResult = adminVoiceResult;
+      adminVoiceResult.replaceChildren();
+      const button = adminVoiceTest;
+      button.disabled = true;
+      voiceResult.textContent = 'Running the voice pipeline test...';
+      try {
+        const diagnostic = await adminFetch('/api/admin/diagnostics/voice', { method: 'POST' });
+        voiceResult.replaceChildren();
+        for (const stage of diagnostic.stages) {
+          const row = document.createElement('p');
+          const tag = document.createElement('span');
+          tag.className = stage.ok ? 'chip chip-teal' : 'chip !bg-rose-50 !text-rose-700 !border-rose-200';
+          tag.textContent = stage.ok ? 'pass' : 'fail';
+          row.append(`${stage.stage}: `, tag, ` ${stage.detail}`);
+          voiceResult.append(row);
+        }
+      } catch (error) {
+        voiceResult.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
 
       adminLogsBody.replaceChildren();
       for (const log of logs.logs) {
@@ -869,6 +905,10 @@
     }
 
     async function loadAdminPanels() {
+      // Defence in depth: a doctor session must never reach an admin-only request,
+      // even if some future code path calls this without checking the role.
+      if (currentRole !== 'SUPERADMIN') return null;
+      if (!adminOverviewCards || !adminAppointmentsBody || !adminSystemBody) return null;
       try {
         const overview = await loadAdminOverview();
         const doctors = await loadDoctors();
@@ -922,17 +962,20 @@
     }
 
     function showDashboard(session) {
+      // Role comes from the session payload and falls back to DOCTOR, so a doctor
+      // session can never be treated as superadmin and never hits an admin route.
+      const role = session.role === 'SUPERADMIN' ? 'SUPERADMIN' : 'DOCTOR';
       notice.hidden = true;
       loginSection.hidden = true;
-      dashboardSection.hidden = session.role !== 'DOCTOR';
-      adminSection.hidden = session.role !== 'SUPERADMIN';
+      dashboardSection.hidden = role !== 'DOCTOR';
+      adminSection.hidden = role !== 'SUPERADMIN';
       logoutButton.hidden = false;
       appShell.hidden = false;
-      currentRole = session.role;
+      currentRole = role;
       editingAdminDoctorId = null;
       editingClinicSetup = false;
       updateNavVisibility();
-      const brand = session.role === 'DOCTOR'
+      const brand = role === 'DOCTOR'
         ? `${session.doctorName || 'Doctor'} | ${session.clinicName || 'Clinic'}`
         : 'DoctorBot | Superadmin';
       document.querySelector('#brand').textContent = brand;
@@ -946,7 +989,7 @@
             reportCalendarRedirect();
           }
         }).catch((error) => showError(error.message));
-      } else if (session.role === 'SUPERADMIN') {
+      } else if (currentRole === 'SUPERADMIN') {
         loadDoctors().catch((error) => showError(error.message));
         loadAdminPanels();
       }
@@ -1219,21 +1262,32 @@
         ? Number(settings.appointmentDurationMinutes)
         : 30);
       lookaheadInput.value = String(Math.min(30, Math.max(1, Number(settings.appointmentLookaheadDays) || 7)));
+      document.querySelector('#clinic-report-time').value = /^\d{2}:\d{2}$/.test(settings.reportTime || '')
+        ? settings.reportTime
+        : '00:00';
       renderTimingSummary();
     }
+
+    const reportTimeInput = document.querySelector('#clinic-report-time');
+    if (reportTimeInput) reportTimeInput.addEventListener('input', renderTimingSummary);
 
     function readClinicTiming() {
       const officeStartHour = Number(document.querySelector('#office-start-hour').value);
       const officeEndHour = Number(document.querySelector('#office-end-hour').value);
       const appointmentDurationMinutes = Number(document.querySelector('#appointment-duration').value);
       const appointmentLookaheadDays = Number(document.querySelector('#appointment-lookahead').value);
+      const reportTime = document.querySelector('#clinic-report-time').value;
       const error = document.querySelector('#timing-error');
       const valid = officeStartHour >= 0 && officeEndHour <= 24 && officeEndHour > officeStartHour &&
-        Number.isInteger(appointmentLookaheadDays) && appointmentLookaheadDays >= 1 && appointmentLookaheadDays <= 30;
+        Number.isInteger(appointmentLookaheadDays) && appointmentLookaheadDays >= 1 && appointmentLookaheadDays <= 30 &&
+        /^([01]\d|2[0-3]):[0-5]\d$/.test(reportTime);
       error.hidden = valid;
-      error.textContent = valid ? '' : 'Closing time must be later than opening time, and bookings must be 1 to 30 days ahead.';
+      error.textContent = valid ? ''
+        : 'Closing time must be later than opening time, bookings must be 1 to 30 days ahead, and the report time must be a valid HH:MM.';
       renderTimingSummary();
-      return valid ? { officeStartHour, officeEndHour, appointmentDurationMinutes, appointmentLookaheadDays } : null;
+      return valid
+        ? { officeStartHour, officeEndHour, appointmentDurationMinutes, appointmentLookaheadDays, reportTime }
+        : null;
     }
 
     function renderTimingSummary() {
@@ -1249,7 +1303,9 @@
       }
       const total = Math.floor((end * 60 - start * 60) / duration);
       summary.textContent = `Patients can book ${total} slot${total === 1 ? '' : 's'} per open day `
-        + `(${hourLabel(start)} to ${hourLabel(end)}), up to ${lookahead} day${lookahead === 1 ? '' : 's'} ahead.`;
+        + `(${hourLabel(start)} to ${hourLabel(end)}), up to ${lookahead} day${lookahead === 1 ? '' : 's'} ahead. `
+        + `The appointment report is emailed daily at `
+        + `${document.querySelector('#clinic-report-time').value || '00:00'} (clinic time).`;
       if (statHours) {
         statHours.textContent = `${hourLabel(start)} – ${hourLabel(end)}`;
       }

@@ -91,11 +91,42 @@ function normalizeClinicTimingInput(body = {}) {
   return patch;
 }
 
+const reportTimePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+const defaultReportTime = '00:00';
+
+function normalizeReportTime(value) {
+  if (value === undefined || value === null || value === '') return defaultReportTime;
+  const candidate = String(value).trim();
+  if (!reportTimePattern.test(candidate)) return null;
+  return candidate;
+}
+
+// HH:MM in a fixed clinic-local zone, used by the daily report scheduler.
+function currentLocalTime(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+  const hour = parts.find((part) => part.type === 'hour')?.value || '00';
+  const minute = parts.find((part) => part.type === 'minute')?.value || '00';
+  return `${hour}:${minute}`;
+}
+
+function isReportDueNow(doctorProfile, date = new Date(), timeZone = 'Asia/Karachi') {
+  const reportTime = normalizeReportTime(doctorProfile?.reportTime) ?? defaultReportTime;
+  return currentLocalTime(date, timeZone) === reportTime;
+}
+
 module.exports = {
   DEFAULTS,
   LIMITS,
+  currentLocalTime,
+  isReportDueNow,
   isValidHourSetting,
   normalizeClinicTimingInput,
+  normalizeReportTime,
   resolveClinicTiming,
   resolveEnvironmentTiming
 };

@@ -81,7 +81,7 @@ for (const endpoint of ['/api/dashboard/login', '/api/dashboard/logout', '/api/d
   '/api/dashboard/whatsapp/connect', '/api/dashboard/calendar/status', '/api/dashboard/calendar/settings',
   '/api/dashboard/calendar/disconnect', '/api/admin/doctors',
   '/api/admin/overview', '/api/admin/appointments', '/api/admin/analytics', '/api/admin/system',
-  '/api/admin/service-logs']) {
+  '/api/admin/service-logs', '/api/admin/diagnostics/voice']) {
   if (!inline.includes(endpoint)) {
     console.error(`dashboard: script no longer calls ${endpoint}`);
     process.exit(1);
@@ -99,10 +99,27 @@ for (const match of serverSource.matchAll(/app\.(get|post|put|patch)\('(\/api\/a
   }
 }
 const adminRoutes = [...serverSource.matchAll(/app\.(get|post|put|patch)\('\/api\/admin\//g)].length;
-if (adminRoutes < 8) {
+if (adminRoutes < 11) {
   console.error(`server: expected a full control panel, found only ${adminRoutes} admin routes`);
   process.exit(1);
 }
+for (const id of ['clinic-report-time', 'admin-voice-test', 'admin-voice-result']) {
+  if (!requiredIds.includes(id) && !html.includes(`id="${id}"`)) {
+    console.error(`dashboard: required element ${id} is missing`);
+    process.exit(1);
+  }
+}
+
+// A doctor session must never be able to render or request the admin control panel.
+if (/session\.role\s*!==\s*'SUPERADMIN'/.test(inline) || /session\.role\s*!==\s*'DOCTOR'/.test(inline)) {
+  console.error('dashboard: role checks must read the normalised currentRole, not the raw session');
+  process.exit(1);
+}
+if (!inline.includes("currentRole !== 'SUPERADMIN'") || !inline.includes('adminOverviewCards || !adminAppointmentsBody')) {
+  console.error('dashboard: the admin loaders must refuse to run for a non-superadmin session');
+  process.exit(1);
+}
+
 for (const anchor of ['admin-overview-anchor', 'admin-appointments-anchor', 'admin-analytics-anchor',
   'admin-system-anchor', 'admin-doctors-anchor', 'admin-create-anchor']) {
   if (!html.includes(`id="${anchor}"`)) {

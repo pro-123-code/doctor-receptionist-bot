@@ -165,8 +165,69 @@ async function translateVoiceMessageToEnglish(
   throw primaryError || Object.assign(new Error('Voice transcription returned no text'), { code: 'VOICE_TRANSCRIPT_EMPTY' });
 }
 
+// Builds a short synthetic WAV tone so the transcription pipeline can be exercised
+// end to end without sending real patient audio anywhere.
+function buildDiagnosticVoiceSample(seconds = 1) {
+  const sampleRate = 16000;
+  const sampleCount = Math.max(1, Math.floor(sampleRate * seconds));
+  const dataSize = sampleCount * 2;
+  const buffer = Buffer.alloc(44 + dataSize);
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(1, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * 2, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(dataSize, 40);
+  for (let index = 0; index < sampleCount; index += 1) {
+    buffer.writeInt16LE(Math.round(Math.sin((index / sampleRate) * 2 * Math.PI * 440) * 6000), 44 + index * 2);
+  }
+  return buffer;
+}
+
+// Runs the same conversion and provider call the WhatsApp path uses, so a failure
+// reports the exact stage and reason rather than a generic failure.
+async function diagnoseVoicePipeline(
+  environment = process.env, fetchImplementation = fetch,
+  audioConverter = convertWhatsAppAudioToWav
+) {
+  const stages = [];
+  const record = (stage, ok, detail) => { stages.push({ stage, ok, detail }); return ok; };
+
+  const allowPatientData = environment.OPENAI_ALLOW_PHI_PROCESSING === 'true';
+  if (!record('configuration', allowPatientData,
+    allowPatientData ? 'Patient-data processing is approved'
+      : 'OPENAI_ALLOW_PHI_PROCESSING must be set to true')) {
+    return { ready: false, stages };
+  }
+  const hasKey = Boolean(environment.OPENAI_API_KEY);
+  if (!record('api-key', hasKey, hasKey ? 'API key present' : 'OPENAI_API_KEY is not set')) {
+    return { ready: false, stages };
+  }
+
+  const wavData = await audioConverter(buildDiagnosticVoiceSample());
+  record('audio-conversion', Boolean(wavData?.length), `ffmpeg produced ${wavData?.length || 0} bytes`);
+
+  try {
+    const text = await requestWhisperEndpoint('transcriptions', wavData, environment, fetchImplementation);
+    record('whisper', true, text ? `Provider returned ${text.length} character(s)` : 'Provider returned no text');
+    return { ready: true, stages, transcript: text };
+  } catch (error) {
+    record('whisper', false, error.message);
+    return { ready: false, stages };
+  }
+}
+
 module.exports = {
+  buildDiagnosticVoiceSample,
   convertWhatsAppAudioToWav,
+  diagnoseVoicePipeline,
   getVoiceFileExtension,
   isVoiceErrorRetryable,
   translateVoiceMessageToEnglish

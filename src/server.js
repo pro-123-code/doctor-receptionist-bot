@@ -12,7 +12,7 @@ const { Appointment, connectDatabase, deleteConversation, Doctor, getConversatio
 const { extractPatientField, extractSlotNumber } = require('./gemini');
 const { getLocalDateParts, getLocalDayBounds, parseRequestedDate } = require('./dateParser');
 const { mountDashboard } = require('./dashboard');
-const { startDailyReport } = require('./cronJobs');
+const { startDailyReportScheduler } = require('./cronJobs');
 const { getCalendarErrorDetails } = require('./calendarErrors');
 const { getWelcomeMessage } = require('./greetings');
 const { formatFacilityRate, formatRupees } = require('./facilityPricing');
@@ -1131,8 +1131,6 @@ async function startDoctorWhatsApp(doctorProfile) {
   });
 }
 
-const doctorReportTasks = new Map();
-
 async function synchronizeDoctorWorkers() {
   const activeDoctors = await Doctor.find({ isActive: true }).select('+googleCredentialsEncrypted').lean();
   const activeDoctorIds = new Set(activeDoctors.map(({ doctorId: activeDoctorId }) => activeDoctorId));
@@ -1141,9 +1139,6 @@ async function synchronizeDoctorWorkers() {
     if (!activeDoctorIds.has(connectedDoctorId)) {
       whatsappSockets.delete(connectedDoctorId);
       socket.end(new Error('Doctor account deactivated'));
-      const reportTask = doctorReportTasks.get(connectedDoctorId);
-      if (reportTask) reportTask.stop();
-      doctorReportTasks.delete(connectedDoctorId);
     }
   }
 
@@ -1158,14 +1153,6 @@ async function synchronizeDoctorWorkers() {
           logServiceError('WhatsApp startup', error, [], doctorProfile.doctorId));
       } else if (!whatsappConnectionStates.has(doctorProfile.doctorId)) {
         whatsappConnectionStates.set(doctorProfile.doctorId, { status: 'disconnected' });
-      }
-    }
-    if (!doctorReportTasks.has(doctorProfile.doctorId)) {
-      try {
-        const reportTask = startDailyReport(doctorProfile);
-        if (reportTask) doctorReportTasks.set(doctorProfile.doctorId, reportTask);
-      } catch (error) {
-        logServiceError('Daily report scheduler startup', error, [], doctorProfile.doctorId);
       }
     }
   }
@@ -1279,6 +1266,8 @@ async function startServer() {
 
   writeStartupLog('Starting doctor worker synchronization.');
   startDoctorWorkerSynchronization();
+  writeStartupLog('Starting the per-clinic daily report scheduler.');
+  startDailyReportScheduler({ timeZone });
   writeStartupLog('Startup complete.');
 }
 
