@@ -979,9 +979,9 @@
         ? `${session.doctorName || 'Doctor'} | ${session.clinicName || 'Clinic'}`
         : 'DoctorBot | Superadmin';
       document.querySelector('#brand').textContent = brand;
-      if (brandMobile) brandMobile.textContent = isSuperadmin ? 'DoctorBot Admin' : (session.clinicName || 'DoctorBot');
+      if (brandMobile) brandMobile.textContent = role === 'SUPERADMIN' ? 'DoctorBot Admin' : (session.clinicName || 'DoctorBot');
       document.title = `${brand} Dashboard`;
-      if (session.role === 'DOCTOR') {
+      if (role === 'DOCTOR') {
         loadDoctorSettings().then((settings) => {
           if (settings.setupComplete) {
             loadAppointments().catch((error) => showError(error.message));

@@ -37,6 +37,9 @@ jobs:
       - name: Dashboard contract check
         run: npm run dashboard:check
 
+      - name: Dashboard runtime check
+        run: npm run dashboard:runtime
+
       - name: Test suite
         run: npm test
 

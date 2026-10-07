@@ -111,12 +111,15 @@ for (const id of ['clinic-report-time', 'admin-voice-test', 'admin-voice-result'
 }
 
 // A doctor session must never be able to render or request the admin control panel.
-if (/session\.role\s*!==\s*'SUPERADMIN'/.test(inline) || /session\.role\s*!==\s*'DOCTOR'/.test(inline)) {
-  console.error('dashboard: role checks must read the normalised currentRole, not the raw session');
-  process.exit(1);
-}
 if (!inline.includes("currentRole !== 'SUPERADMIN'") || !inline.includes('adminOverviewCards || !adminAppointmentsBody')) {
   console.error('dashboard: the admin loaders must refuse to run for a non-superadmin session');
+  process.exit(1);
+}
+// The runtime check exists because compiling the script cannot detect a variable
+// that is declared in another function's scope, so the role used for rendering
+// must be the one showDashboard derives for itself.
+if (!/function showDashboard\(session\)[\s\S]{0,600}?const role = session\.role === 'SUPERADMIN'/.test(inline)) {
+  console.error("dashboard: showDashboard must normalise the role into its own 'role' binding");
   process.exit(1);
 }
 
