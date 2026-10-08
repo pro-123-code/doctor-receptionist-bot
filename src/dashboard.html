@@ -506,6 +506,7 @@
           <button id="admin-system-refresh" class="btn btn-ghost" type="button">Refresh</button>
         </div>
         <div id="admin-system-body" class="p-5 sm:p-6 grid gap-6 lg:grid-cols-2"></div>
+        <div id="admin-remediation" class="px-5 sm:px-6 pb-5 sm:pb-6 space-y-3" hidden></div>
         <div class="px-5 sm:px-6 pb-5 sm:pb-6">
           <div class="flex flex-wrap items-center gap-3">
             <button id="admin-voice-test" class="btn btn-ghost btn-sm" type="button">Test voice transcription</button>
@@ -851,10 +852,37 @@
           ['Voice transcription', system.configuration.voiceTranscriptionEnabled ? 'Enabled' : 'Disabled', system.configuration.voiceTranscriptionEnabled ? 'good' : 'warn'],
           ['Gemini extraction', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'Enabled' : 'Disabled', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'good' : 'warn'],
           ['Daily email reports', system.configuration.smtpConfigured ? 'Configured' : 'Not configured', system.configuration.smtpConfigured ? 'good' : 'warn'],
-          ['WhatsApp sessions persist', system.whatsapp.sessionPersistent ? 'Persistent' : 'Ephemeral', system.whatsapp.sessionPersistent ? 'good' : 'warn'],
-          ['Voice pipeline', system.configuration.voiceTranscriptionEnabled ? 'Enabled' : 'Disabled', system.configuration.voiceTranscriptionEnabled ? 'good' : 'warn']
+          ['WhatsApp sessions persist', system.whatsapp.sessionPersistent ? 'Persistent' : 'Ephemeral', system.whatsapp.sessionPersistent ? 'good' : 'warn']
         ])
       );
+
+      // Every disabled row above is caused by missing configuration rather than a
+      // defect, so name the exact variables to set instead of only saying "Disabled".
+      const remediation = document.querySelector('#admin-remediation');
+      const blocked = system.readiness?.blocked || [];
+      remediation.replaceChildren();
+      remediation.hidden = blocked.length === 0;
+      if (blocked.length) {
+        const heading = document.createElement('p');
+        heading.className = 'text-sm font-bold text-slate-900';
+        heading.textContent = `${blocked.length} integration${blocked.length === 1 ? '' : 's'} need configuration`;
+        remediation.append(heading);
+        for (const item of blocked) {
+          const block = document.createElement('div');
+          block.className = 'rounded-xl border border-amber-200 bg-amber-50 p-3';
+          const title = document.createElement('p');
+          title.className = 'text-sm font-semibold text-amber-900';
+          title.textContent = item.label;
+          const vars = document.createElement('p');
+          vars.className = 'mt-1 font-mono text-xs text-amber-900';
+          vars.textContent = item.missing.length ? item.missing.join('  ') : 'See the note below';
+          const remedy = document.createElement('p');
+          remedy.className = 'mt-1 text-xs text-amber-800';
+          remedy.textContent = item.remedy;
+          block.append(title, vars, remedy);
+          remediation.append(block);
+        }
+      }
 
       const voiceResult = adminVoiceResult;
       adminVoiceResult.replaceChildren();

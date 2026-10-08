@@ -2593,6 +2593,13 @@ test('superadmin overview, analytics, system and logs endpoints serve real data'
     assert.equal(system.body.whatsapp.sessionPersistent, true);
     assert.equal(system.body.whatsapp.connections.length, 1);
     assert.equal(system.body.clinics.length, 2);
+    assert.ok(system.body.readiness, 'the system panel must report integration readiness');
+    assert.ok(Array.isArray(system.body.readiness.blocked));
+    for (const item of system.body.readiness.blocked) {
+      assert.equal(typeof item.missing, 'object');
+      assert.ok(item.remedy.length > 40, 'each blocked integration must explain its fix');
+    }
+    assert.ok(!JSON.stringify(system.body.readiness).includes('undefined-secret'));
     assert.equal(Object.keys(system.body.configuration).some((key) => /password|secret|key$/i.test(key) && system.body.configuration[key]), false,
       'configuration must never expose secrets');
 
@@ -2716,4 +2723,97 @@ test('the daily report scheduler survives a database failure without stopping', 
   await new Promise((resolve) => setTimeout(resolve, 30));
   clearInterval(scheduler);
   assert.equal(attempts, 1, 'a failed listing must not throw out of the tick');
+});
+const { evaluateReadiness } = require('../src/readiness');
+
+const fullyConfigured = {
+  OPENAI_API_KEY: 'sk-live-abcdef123456',
+  OPENAI_ALLOW_PHI_PROCESSING: 'true',
+  GEMINI_API_KEY: 'AIzaSyEXAMPLEKEY12345',
+  GEMINI_ALLOW_PHI_PROCESSING: 'true',
+  SMTP_HOST: 'smtp.gmail.com',
+  SMTP_PORT: '587',
+  SMTP_USER: 'reports@example.test',
+  SMTP_PASS: 'super-secret-password',
+  EMAIL_FROM: 'reports@example.test',
+  BAILEYS_AUTH_DIR: '/data/sessions',
+  GOOGLE_CLIENT_ID: '123.apps.googleusercontent.com',
+  GOOGLE_CLIENT_SECRET: 'GOCSPX-secret-value',
+  TRUST_PROXY: 'true'
+};
+
+test('readiness names the exact variables a disabled integration needs', () => {
+  const empty = evaluateReadiness({}, { googleRedirectUriValid: true });
+  assert.deepEqual(empty.features.voiceTranscription.missing, ['OPENAI_API_KEY', 'OPENAI_ALLOW_PHI_PROCESSING']);
+  assert.deepEqual(empty.features.geminiExtraction.missing, ['GEMINI_API_KEY', 'GEMINI_ALLOW_PHI_PROCESSING']);
+  assert.deepEqual(empty.features.emailReports.missing, ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM']);
+  assert.deepEqual(empty.features.whatsappSessions.missing, ['BAILEYS_AUTH_DIR']);
+  assert.deepEqual(empty.features.trustProxy.missing, ['TRUST_PROXY']);
+  assert.equal(empty.ready, false);
+  assert.equal(empty.blocked.length, 6);
+});
+
+test('readiness reports an integration as ready once it is configured', () => {
+  const ready = evaluateReadiness(fullyConfigured, { googleRedirectUriValid: true });
+  assert.equal(ready.ready, true);
+  assert.deepEqual(ready.blocked, []);
+  for (const feature of Object.values(ready.features)) {
+    assert.equal(feature.ready, true, 'every configured feature must report ready');
+    assert.deepEqual(feature.missing, []);
+  }
+});
+
+test('a present API key with a missing consent flag still reports the flag only', () => {
+  // This is the live state: the keys exist, the consent flags do not.
+  const partial = evaluateReadiness({
+    OPENAI_API_KEY: 'sk-live-abcdef123456',
+    GEMINI_API_KEY: 'AIzaSyEXAMPLEKEY12345'
+  }, { googleRedirectUriValid: true });
+  assert.deepEqual(partial.features.voiceTranscription.missing, ['OPENAI_ALLOW_PHI_PROCESSING']);
+  assert.equal(partial.features.voiceTranscription.ready, false);
+  assert.deepEqual(partial.features.geminiExtraction.missing, ['GEMINI_ALLOW_PHI_PROCESSING']);
+  // Email and sessions were not configured at all in this environment.
+  assert.deepEqual(partial.features.emailReports.missing, ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM']);
+});
+
+test('a consent flag is only honoured as the exact string true', () => {
+  for (const value of ['true', 'TRUE', 'True', ' true ']) {
+    assert.equal(evaluateReadiness({ ...fullyConfigured, OPENAI_ALLOW_PHI_PROCESSING: value })
+      .features.voiceTranscription.ready, true, `"${value}" should be accepted`);
+  }
+  for (const value of ['1', 'yes', 'on', 'false', '']) {
+    assert.equal(evaluateReadiness({ ...fullyConfigured, OPENAI_ALLOW_PHI_PROCESSING: value })
+      .features.voiceTranscription.ready, false, `"${value}" must not enable patient data processing`);
+  }
+});
+
+test('readiness never returns a configured secret value', () => {
+  const ready = evaluateReadiness(fullyConfigured, { googleRedirectUriValid: true });
+  const serialised = JSON.stringify(ready);
+  for (const secret of ['sk-live-abcdef123456', 'AIzaSyEXAMPLEKEY12345', 'super-secret-password',
+    'GOCSPX-secret-value', '123.apps.googleusercontent.com']) {
+    assert.ok(!serialised.includes(secret), `readiness leaked a configured value: ${secret}`);
+  }
+  // Whitespace-only values must count as absent rather than configured.
+  const blank = evaluateReadiness({ OPENAI_API_KEY: '   ', SMTP_HOST: '' }, { googleRedirectUriValid: true });
+  assert.deepEqual(blank.features.voiceTranscription.missing, ['OPENAI_API_KEY', 'OPENAI_ALLOW_PHI_PROCESSING']);
+  assert.ok(blank.features.emailReports.missing.includes('SMTP_HOST'));
+});
+
+test('Google Calendar stays not ready until the redirect URI is valid', () => {
+  const bad = evaluateReadiness(fullyConfigured, { googleRedirectUriValid: false });
+  assert.equal(bad.features.googleCalendar.ready, false);
+  assert.deepEqual(bad.features.googleCalendar.missing, [], 'the client credentials are present');
+  assert.match(bad.features.googleCalendar.remedy, /GOOGLE_REDIRECT_URI/);
+});
+
+test('every blocked entry carries a label, its variables and a remedy', () => {
+  const { blocked } = evaluateReadiness({}, { googleRedirectUriValid: false });
+  assert.ok(blocked.length > 0);
+  for (const item of blocked) {
+    assert.equal(typeof item.label, 'string');
+    assert.ok(item.label.length > 0, `${item.key} must have a readable label`);
+    assert.ok(Array.isArray(item.missing));
+    assert.ok(item.remedy.length > 40, `${item.key} must explain how to fix itself`);
+  }
 });

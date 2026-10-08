@@ -4,3 +4,5 @@ sessions/
 .env
 npm-debug.log*
 .DS_Store
+# Windows shell-folder metadata, not real configuration.
+*.ini

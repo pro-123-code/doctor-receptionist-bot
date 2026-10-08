@@ -10,6 +10,7 @@ const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
 const { getReligiousHolidays } = require('./clinicSchedule');
 const { isValidRupeeAmount, normalizeFacilityPricing } = require('./facilityPricing');
 const { diagnoseVoicePipeline } = require('./voiceTranscription');
+const { evaluateReadiness } = require('./readiness');
 const { normalizeClinicTimingInput, normalizeReportTime, resolveClinicTiming } = require('./clinicTiming');
 const { verifyDoctorCalendarAccess } = require('./calendarAccess');
 
@@ -1359,6 +1360,9 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
           smtpConfigured: Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS),
           emailFromConfigured: Boolean(process.env.EMAIL_FROM)
         },
+        // Names of the environment variables each disabled feature still needs,
+        // never their values, so the panel can tell an operator what to set.
+        readiness: evaluateReadiness(process.env, { googleRedirectUriValid: oauthStatus.available }),
         whatsapp: {
           authDirectory: sessionInfo.authDirectory || null,
           sessionPersistent: sessionInfo.persistent !== false,

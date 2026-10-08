@@ -13,6 +13,7 @@ const { extractPatientField, extractSlotNumber } = require('./gemini');
 const { getLocalDateParts, getLocalDayBounds, parseRequestedDate } = require('./dateParser');
 const { mountDashboard } = require('./dashboard');
 const { startDailyReportScheduler } = require('./cronJobs');
+const { evaluateReadiness } = require('./readiness');
 const { getCalendarErrorDetails } = require('./calendarErrors');
 const { getWelcomeMessage } = require('./greetings');
 const { formatFacilityRate, formatRupees } = require('./facilityPricing');
@@ -1278,6 +1279,17 @@ async function startServer() {
     return;
   }
 
+  if (!process.env.GEMINI_ALLOW_PHI_PROCESSING || process.env.GEMINI_ALLOW_PHI_PROCESSING !== 'true') {
+    writeStartupLog('Gemini patient-data extraction is disabled: set GEMINI_ALLOW_PHI_PROCESSING=true to enable it.'
+      + (process.env.GEMINI_API_KEY ? ' An API key is already present.' : ' GEMINI_API_KEY is also unset.'));
+  }
+  const emailReadiness = evaluateReadiness(process.env);
+  if (emailReadiness.features.emailReports.missing.length) {
+    writeStartupLog(`Daily email reports are disabled: set ${emailReadiness.features.emailReports.missing.join(', ')} in the environment.`);
+  }
+  if (!process.env.TRUST_PROXY || process.env.TRUST_PROXY !== 'true') {
+    writeStartupLog('TRUST_PROXY is not set to true. Behind a TLS-terminating proxy the dashboard login cookie will not be marked secure and the Google redirect URI is derived as http.');
+  }
   writeStartupLog('Starting doctor worker synchronization.');
   startDoctorWorkerSynchronization();
   writeStartupLog('Starting the per-clinic daily report scheduler.');

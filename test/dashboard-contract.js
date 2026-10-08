@@ -103,7 +103,7 @@ if (adminRoutes < 11) {
   console.error(`server: expected a full control panel, found only ${adminRoutes} admin routes`);
   process.exit(1);
 }
-for (const id of ['clinic-report-time', 'admin-voice-test', 'admin-voice-result']) {
+for (const id of ['clinic-report-time', 'admin-voice-test', 'admin-voice-result', 'admin-remediation']) {
   if (!requiredIds.includes(id) && !html.includes(`id="${id}"`)) {
     console.error(`dashboard: required element ${id} is missing`);
     process.exit(1);
