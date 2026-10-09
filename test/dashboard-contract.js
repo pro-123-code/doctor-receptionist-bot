@@ -81,7 +81,7 @@ for (const endpoint of ['/api/dashboard/login', '/api/dashboard/logout', '/api/d
   '/api/dashboard/whatsapp/connect', '/api/dashboard/calendar/status', '/api/dashboard/calendar/settings',
   '/api/dashboard/calendar/disconnect', '/api/admin/doctors',
   '/api/admin/overview', '/api/admin/appointments', '/api/admin/analytics', '/api/admin/system',
-  '/api/admin/service-logs', '/api/admin/diagnostics/voice']) {
+  '/api/admin/service-logs', '/api/admin/diagnostics/voice', '/api/admin/doctors/${encodeURIComponent']) {
   if (!inline.includes(endpoint)) {
     console.error(`dashboard: script no longer calls ${endpoint}`);
     process.exit(1);
@@ -91,15 +91,15 @@ for (const endpoint of ['/api/dashboard/login', '/api/dashboard/logout', '/api/d
 // Every admin panel and route must be real: implemented on the server, behind the
 // superadmin guard, and reachable from the sidebar.
 const serverSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'dashboard.js'), 'utf8');
-for (const match of serverSource.matchAll(/app\.(get|post|put|patch)\('(\/api\/admin\/[^']*)',\s*([^)]*)\)/g)) {
+for (const match of serverSource.matchAll(/app\.(get|post|put|patch|delete)\('(\/api\/admin\/[^']*)',\s*([^)]*)\)/g)) {
   const [, , route, guards] = match;
   if (!/requireDashboardAuth/.test(guards) || !/requireSuperadmin/.test(guards)) {
     console.error(`server: ${route} is missing superadmin authorization`);
     process.exit(1);
   }
 }
-const adminRoutes = [...serverSource.matchAll(/app\.(get|post|put|patch)\('\/api\/admin\//g)].length;
-if (adminRoutes < 11) {
+const adminRoutes = [...serverSource.matchAll(/app\.(get|post|put|patch|delete)\('\/api\/admin\//g)].length;
+if (adminRoutes < 12) {
   console.error(`server: expected a full control panel, found only ${adminRoutes} admin routes`);
   process.exit(1);
 }

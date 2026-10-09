@@ -1,9 +1,10 @@
 const crypto = require('node:crypto');
+const fsPromises = require('node:fs/promises');
 const path = require('node:path');
 const mongoose = require('mongoose');
 const { google } = require('googleapis');
 const { getLocalDateParts, getLocalDayBounds } = require('./dateParser');
-const { DashboardUser, DailyReportRun, Doctor, InboundMessage, ServiceLog, consumeDashboardLoginAttempt } = require('./models');
+const { Conversation, DashboardUser, DailyReportRun, Doctor, InboundMessage, ServiceLog, consumeDashboardLoginAttempt } = require('./models');
 const { hashPassword, verifyPassword } = require('./passwords');
 const { encryptJson, hasValidEncryptionKey } = require('./secretBox');
 const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
@@ -1362,10 +1363,15 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         },
         // Names of the environment variables each disabled feature still needs,
         // never their values, so the panel can tell an operator what to set.
-        readiness: evaluateReadiness(process.env, { googleRedirectUriValid: oauthStatus.available }),
+        readiness: evaluateReadiness(process.env, {
+          googleRedirectUriValid: oauthStatus.available,
+          sessionWritable: sessionInfo.writable !== false
+        }),
         whatsapp: {
           authDirectory: sessionInfo.authDirectory || null,
           sessionPersistent: sessionInfo.persistent !== false,
+          sessionWritable: sessionInfo.writable !== false,
+          sessionSource: sessionInfo.source || 'local',
           sessionNotice: sessionInfo.notice || null,
           connections: connectionStatuses
         },
@@ -1379,6 +1385,75 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     } catch (error) {
       console.error(`Admin system status failed (${error?.name || 'Error'})`);
       response.status(503).json({ error: 'System status is temporarily unavailable' });
+    }
+  });
+
+  // Permanently removes a clinic and everything owned by it. Destructive, so the
+  // caller must echo the doctor id back as confirmation, which stops a stray click
+  // or a replayed request from destroying data.
+  app.delete('/api/admin/doctors/:doctorId', requireDashboardAuth, requireSuperadmin, async (request, response) => {
+    const targetDoctorId = request.params.doctorId;
+    try {
+      if (!isValidDoctorSlug(targetDoctorId)) {
+        return response.status(400).json({ error: 'That clinic id is not valid' });
+      }
+      const doctor = await Doctor.findOne({ doctorId: targetDoctorId }).select('doctorId clinicName').lean();
+      if (!doctor) return response.status(404).json({ error: 'Doctor not found' });
+      if (request.body?.confirm !== targetDoctorId) {
+        return response.status(400).json({
+          error: `Send {"confirm":"${targetDoctorId}"} to confirm deletion`,
+          requiresConfirmation: true
+        });
+      }
+
+      // Remove the owned records first so a partial failure never leaves a live
+      // clinic profile pointing at data that no longer exists.
+      const [users, appointments, conversations, inbound, serviceLogs, reportRuns] = await Promise.all([
+        DashboardUser.deleteMany({ doctorId: targetDoctorId }),
+        Appointment.deleteMany({ doctorId: targetDoctorId }),
+        Conversation.deleteMany({ doctorId: targetDoctorId }),
+        InboundMessage.deleteMany({ doctorId: targetDoctorId }),
+        ServiceLog.deleteMany({ doctorId: targetDoctorId }),
+        DailyReportRun.deleteMany({ doctorId: targetDoctorId })
+      ]);
+      await Doctor.deleteOne({ doctorId: targetDoctorId });
+
+      // The WhatsApp session holds device credentials, so it must go with the
+      // account rather than linger on disk for the next clinic on that id.
+      const sessionRoot = typeof whatsappConnection.getWhatsAppSessionInfo === 'function'
+        ? whatsappConnection.getWhatsAppSessionInfo().authDirectory
+        : null;
+      let sessionRemoved = false;
+      if (sessionRoot) {
+        try {
+          await fsPromises.rm(path.resolve(sessionRoot, `doctor_${targetDoctorId}`), { recursive: true, force: true });
+          sessionRemoved = true;
+        } catch (error) {
+          console.error(`WhatsApp session removal failed for ${targetDoctorId} (${error?.name || 'Error'})`);
+        }
+      }
+
+      console.log(`Doctor account deleted (${targetDoctorId}) by superadmin`);
+      response.json({
+        deleted: true,
+        doctorId: targetDoctorId,
+        clinicName: doctor.clinicName || null,
+        removed: {
+          dashboardUsers: users.deletedCount || 0,
+          appointments: appointments.deletedCount || 0,
+          conversations: conversations.deletedCount || 0,
+          inboundMessages: inbound.deletedCount || 0,
+          serviceLogs: serviceLogs.deletedCount || 0,
+          dailyReportRuns: reportRuns.deletedCount || 0,
+          whatsappSession: sessionRemoved
+        },
+        // The worker for this clinic is closed by the next synchronisation pass
+        // because the profile no longer lists it as active.
+        note: 'The WhatsApp worker for this clinic stops within about 30 seconds.'
+      });
+    } catch (error) {
+      console.error(`Doctor account deletion failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Doctor account could not be deleted' });
     }
   });
 

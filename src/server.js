@@ -1011,25 +1011,69 @@ async function enqueueWhatsAppMessages(doctorProfile, socket, messages) {
   startDoctorQueueProcessor(doctorProfile, socket);
 }
 
+// Container platforms mount a persistent disk at a conventional path. Detecting
+// one means a correctly configured deployment starts persisting WhatsApp sessions
+// even when BAILEYS_AUTH_DIR was never set, instead of silently writing to a
+// layer that is wiped on every deploy.
+const PERSISTENT_DISK_CANDIDATES = ['/data', '/var/data', '/mnt/data'];
+
+function findPersistentDiskRoot() {
+  for (const candidate of PERSISTENT_DISK_CANDIDATES) {
+    try {
+      if (fs.statSync(candidate).isDirectory()) return candidate;
+    } catch {
+      // Candidate is not mounted here, which is the normal case on a laptop.
+    }
+  }
+  return null;
+}
+
 function getBaileysAuthRoot() {
   const localDataRoot = process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share');
   const configuredRoot = process.env.BAILEYS_AUTH_DIR;
+  // A root that already exists is treated as persistent even without the variable,
+  // because the host operator created it deliberately.
+  const detectedRoot = configuredRoot || findPersistentDiskRoot();
   return {
-    root: configuredRoot || path.join(localDataRoot, 'DoctorBot', 'sessions'),
+    root: detectedRoot ? path.join(detectedRoot, 'sessions')
+      : path.join(localDataRoot, 'DoctorBot', 'sessions'),
     // Container platforms keep an ephemeral filesystem, so WhatsApp device sessions
-    // disappear on every deploy unless BAILEYS_AUTH_DIR points at a persistent disk.
-    persistent: Boolean(configuredRoot)
+    // disappear on every deploy unless the root sits on a mounted persistent disk.
+    persistent: Boolean(detectedRoot),
+    source: configuredRoot ? 'BAILEYS_AUTH_DIR' : (detectedRoot ? 'detected-disk' : 'local'),
+    diskRoot: detectedRoot
   };
 }
 
+// A directory that exists but cannot be written to would let a clinic scan its QR
+// code and still lose the session on the next write, so verify before claiming
+// persistence.
+function isWritableDirectory(targetPath) {
+  try {
+    fs.mkdirSync(targetPath, { recursive: true });
+    fs.accessSync(targetPath, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function getBaileysSessionInfo() {
-  const { root, persistent } = getBaileysAuthRoot();
+  const { root, persistent, source, diskRoot } = getBaileysAuthRoot();
+  const writable = isWritableDirectory(root);
   return {
     authDirectory: root,
-    persistent,
-    notice: persistent
+    // An unwritable location cannot hold a session, so it is never reported as
+    // persistent regardless of how the path was chosen.
+    persistent: persistent && writable,
+    writable,
+    source,
+    diskRoot,
+    notice: persistent && writable
       ? null
-      : 'WhatsApp device sessions are stored on an ephemeral filesystem and will be lost on every deploy. Set BAILEYS_AUTH_DIR to a mounted persistent disk.'
+      : 'WhatsApp device sessions are stored on an ephemeral filesystem and will be lost on every deploy. '
+        + 'Attach a persistent disk in Render (Settings > Disks, mount path /data) and set '
+        + 'BAILEYS_AUTH_DIR=/data/sessions, then redeploy.'
   };
 }
 

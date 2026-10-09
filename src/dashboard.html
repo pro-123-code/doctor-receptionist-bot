@@ -676,6 +676,12 @@
       return response.json();
     }
 
+    // Every admin panel reads a list out of a server response. A missing or renamed
+// field must render an empty panel, never crash the whole dashboard.
+function asArray(value) {
+      return Array.isArray(value) ? value : [];
+    }
+
     function statCard(label, value, caption) {
       const card = document.createElement('div');
       card.className = 'surface p-5 transition-shadow duration-200 hover:shadow-lift';
@@ -694,11 +700,13 @@
 
     async function loadAdminOverview() {
       const data = await adminFetch('/api/admin/overview');
+      const doctors = data.doctors || {};
+      const appointments = data.appointments || {};
       adminOverviewCards.replaceChildren(
-        statCard('Clinics', String(data.doctors.total), `${data.doctors.active} active · ${data.doctors.setupPending} awaiting setup`),
-        statCard('Appointments', String(data.appointments.total), `${data.appointments.last30Days} in the last 30 days`),
-        statCard('Upcoming', String(data.appointments.upcoming), `${data.appointments.today} today`),
-        statCard('Patients', String(data.appointments.uniquePatients), 'unique WhatsApp numbers')
+        statCard('Clinics', String(doctors.total ?? 0), `${doctors.active ?? 0} active · ${doctors.setupPending ?? 0} awaiting setup`),
+        statCard('Appointments', String(appointments.total ?? 0), `${appointments.last30Days ?? 0} in the last 30 days`),
+        statCard('Upcoming', String(appointments.upcoming ?? 0), `${appointments.today ?? 0} today`),
+        statCard('Patients', String(appointments.uniquePatients ?? 0), 'unique WhatsApp numbers')
       );
       adminOverviewAlerts.replaceChildren();
       const alerts = [];
@@ -745,7 +753,7 @@
       const formatter = new Intl.DateTimeFormat(undefined, {
         dateStyle: 'medium', timeStyle: 'short', timeZone: data.timeZone
       });
-      for (const appointment of data.appointments) {
+      for (const appointment of asArray(data.appointments)) {
         const row = document.createElement('tr');
         const cells = [
           appointment.patientName || '—',
@@ -762,15 +770,15 @@
         });
         adminAppointmentsBody.append(row);
       }
-      adminAppointmentsCount.textContent = `Showing ${data.appointments.length} of ${data.total} matching appointment(s).`;
+      adminAppointmentsCount.textContent = `Showing ${asArray(data.appointments).length} of ${data.total ?? 0} matching appointment(s).`;
       return data;
     }
 
     async function loadAdminAnalytics() {
       const data = await adminFetch(`/api/admin/analytics?days=${encodeURIComponent(adminAnalyticsDays.value)}`);
-      const peak = Math.max(1, ...data.dailyBookings.map((entry) => entry.appointments));
+      const peak = Math.max(1, ...asArray(data.dailyBookings).map((entry) => entry.appointments));
       adminAnalyticsChart.replaceChildren();
-      for (const entry of data.dailyBookings) {
+      for (const entry of asArray(data.dailyBookings)) {
         const column = document.createElement('div');
         column.className = 'flex-1 flex flex-col items-center justify-end gap-1 min-w-[14px]';
         const bar = document.createElement('div');
@@ -783,10 +791,10 @@
         column.append(bar, label);
         adminAnalyticsChart.append(column);
       }
-      document.querySelector('#admin-analytics-chart-empty').hidden = data.dailyBookings.length > 0;
+      document.querySelector('#admin-analytics-chart-empty').hidden = asArray(data.dailyBookings).length > 0;
 
       adminAnalyticsBody.replaceChildren();
-      for (const row of data.doctors) {
+      for (const row of asArray(data.doctors)) {
         const tr = document.createElement('tr');
         const cells = [
           `${row.doctorName} — ${row.clinicName}`,
@@ -852,7 +860,9 @@
           ['Voice transcription', system.configuration.voiceTranscriptionEnabled ? 'Enabled' : 'Disabled', system.configuration.voiceTranscriptionEnabled ? 'good' : 'warn'],
           ['Gemini extraction', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'Enabled' : 'Disabled', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'good' : 'warn'],
           ['Daily email reports', system.configuration.smtpConfigured ? 'Configured' : 'Not configured', system.configuration.smtpConfigured ? 'good' : 'warn'],
-          ['WhatsApp sessions persist', system.whatsapp.sessionPersistent ? 'Persistent' : 'Ephemeral', system.whatsapp.sessionPersistent ? 'good' : 'warn']
+          ['WhatsApp sessions persist', system.whatsapp.sessionPersistent ? 'Persistent' : 'Ephemeral', system.whatsapp.sessionPersistent ? 'good' : 'warn'],
+          ['Session folder writable', system.whatsapp.sessionWritable === false ? 'Read only' : 'Writable', system.whatsapp.sessionWritable === false ? 'warn' : 'good'],
+          ['Session path source', system.whatsapp.sessionSource || 'local']
         ])
       );
 
@@ -907,7 +917,7 @@
       }
 
       adminLogsBody.replaceChildren();
-      for (const log of logs.logs) {
+      for (const log of asArray(logs.logs)) {
         const row = document.createElement('tr');
         const when = document.createElement('td');
         when.className = 'whitespace-nowrap text-ink-soft';
@@ -928,7 +938,7 @@
         row.append(when, level, doctor, event, code);
         adminLogsBody.append(row);
       }
-      adminLogsEmpty.hidden = logs.logs.length > 0;
+      adminLogsEmpty.hidden = asArray(logs.logs).length > 0;
       return system;
     }
 
@@ -939,7 +949,7 @@
       if (!adminOverviewCards || !adminAppointmentsBody || !adminSystemBody) return null;
       try {
         const overview = await loadAdminOverview();
-        const doctors = await loadDoctors();
+        const doctors = (await loadDoctors()) || [];
         fillClinicFilter(doctors.map((doctor) => ({ doctorId: doctor.doctorId, doctorName: doctor.doctorName, clinicName: doctor.clinicName })));
         await Promise.all([
           loadAdminAppointments().catch((error) => showError(error.message)),
@@ -1529,12 +1539,50 @@ function readFacilityPricing() {
       }
     }
 
+    // Deletion is permanent, so it is gated behind a typed confirmation and the
+    // account is never removed without the doctor id echoed back to the server.
+    function deleteDoctorAccount(doctor) {
+      const label = `${doctor.doctorName || 'this doctor'} (${doctor.clinicName || doctor.doctorId})`;
+      const confirmed = window.prompt(
+        `Permanently delete ${label}?\n\nThis removes the clinic, its appointments, conversations and WhatsApp `
+        + 'session. It cannot be undone.\n\nType the clinic ID to confirm:',
+        ''
+      );
+      if (confirmed === null) return;
+      if (confirmed.trim() !== doctor.doctorId) {
+        showError('The clinic ID did not match, so nothing was deleted.');
+        return;
+      }
+      (async () => {
+        try {
+          const response = await fetch(`/api/admin/doctors/${encodeURIComponent(doctor.doctorId)}`, {
+            method: 'DELETE',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: doctor.doctorId })
+          });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(result.error || 'Could not delete the doctor account.');
+          showBanner(
+            `Deleted ${doctor.clinicName || doctor.doctorId}. Removed ${result.removed.appointments} appointment(s), `
+            + `${result.removed.conversations} conversation(s) and ${result.removed.dashboardUsers} login(s).`,
+            'success'
+          );
+          await loadDoctors();
+          await loadAdminPanels();
+        } catch (error) {
+          showError(error.message);
+        }
+      })();
+    }
+
     async function loadDoctors() {
       const response = await fetch('/api/admin/doctors', { credentials: 'same-origin' });
       if (!response.ok) throw new Error('Could not load doctor accounts.');
       const { doctors } = await response.json();
+      const rows = Array.isArray(doctors) ? doctors : [];
       doctorRows.replaceChildren();
-      for (const doctor of doctors) {
+      for (const doctor of rows) {
         const row = document.createElement('tr');
         for (const value of [
           doctor.doctorName,
@@ -1601,9 +1649,18 @@ function readFacilityPricing() {
           }
         });
         actionCell.append(toggle);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'btn btn-danger-ghost btn-sm !ml-2';
+        remove.textContent = 'Delete account';
+        remove.addEventListener('click', () => deleteDoctorAccount(doctor));
+        actionCell.append(remove);
         row.append(actionCell);
         doctorRows.append(row);
       }
+      // The control panel maps over this result, so returning the list keeps a
+      // missing field from turning into "cannot read properties of undefined".
+      return rows;
     }
 
     document.querySelector('#login-form').addEventListener('submit', async (event) => {

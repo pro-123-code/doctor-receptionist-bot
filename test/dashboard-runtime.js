@@ -153,6 +153,62 @@ function createHarness() {
       religiousHolidayOpenDays: [], religiousHolidays: [],
       welcomeMessage: 'Assalam-o-Alaikum! Welcome to our clinic', setupComplete: false,
       appointmentLookaheadDays: 14, reportTime: '07:30'
+    },
+    '/api/admin/overview': {
+      generatedAt: '2026-10-07T00:00:00.000Z',
+      timeZone: 'Asia/Karachi',
+      doctors: { total: 2, active: 1, setupPending: 1 },
+      appointments: { total: 3, upcoming: 1, today: 1, last30Days: 3, uniquePatients: 2 },
+      messaging: { receivedLast24Hours: 4 },
+      operations: { errorsLast30Days: 0, warningsLast30Days: 0, failedDailyReports: 0, reportFailuresByDoctor: {} }
+    },
+    '/api/admin/doctors': {
+      doctors: [{
+        doctorId: 'clinic-one', doctorName: 'Dr. Haider', clinicName: 'Apna city clinic',
+        email: 'haider@example.test', isActive: true, setupComplete: true,
+        googleCalendarConnected: false, reportTime: '07:30',
+        totalAppointments: 3, upcomingAppointments: 1
+      }]
+    },
+    '/api/admin/appointments': {
+      total: 1, limit: 100, timeZone: 'Asia/Karachi',
+      appointments: [{
+        id: 'a1', doctorId: 'clinic-one', doctorName: 'Dr. Haider', clinicName: 'Apna city clinic',
+        patientName: 'Ada', whatsAppNumber: '+92300', symptoms: 'Checkup',
+        slotStart: '2026-10-08T05:00:00.000Z', slotEnd: '2026-10-08T05:30:00.000Z',
+        bookedAt: '2026-10-07T05:00:00.000Z', status: 'booked'
+      }]
+    },
+    '/api/admin/analytics': {
+      generatedAt: '2026-10-07T00:00:00.000Z', days: 14, since: '2026-09-23T00:00:00.000Z',
+      timeZone: 'Asia/Karachi',
+      dailyBookings: [{ date: '2026-10-07', appointments: 3 }],
+      doctors: [{
+        doctorId: 'clinic-one', doctorName: 'Dr. Haider', clinicName: 'Apna city clinic',
+        email: 'haider@example.test', isActive: true, setupComplete: true, googleCalendarConnected: false,
+        totalAppointments: 3, upcomingAppointments: 1, periodAppointments: 3,
+        lastBookedAt: '2026-10-07T05:00:00.000Z', messagesReceived: 4, voiceMessages: 0, errors: 0, warnings: 0
+      }]
+    },
+    '/api/admin/system': {
+      runtime: {
+        nodeVersion: 'v20.20.2', platform: 'linux', uptimeSeconds: 120,
+        memoryRoundedMb: 167, heapUsedMb: 80, timeZone: 'Asia/Karachi'
+      },
+      configuration: {
+        nodeEnv: 'production', port: 10000, trustProxy: true, databaseConnected: true,
+        databaseHost: 'cluster0.example.mongodb.net', geminiConfigured: true, geminiPatientDataAllowed: false,
+        voiceTranscriptionEnabled: false, googleClientConfigured: true,
+        googleRedirectUri: 'https://example.test/api/auth/google/callback', googleRedirectUriValid: true,
+        smtpConfigured: false, emailFromConfigured: false
+      },
+      readiness: { features: {}, blocked: [], ready: true },
+      whatsapp: { authDirectory: '/data/sessions', sessionPersistent: true, sessionNotice: null, connections: [] },
+      clinics: [{ doctorId: 'clinic-one', isActive: true, setupComplete: true, googleCalendarConnected: false }]
+    },
+    '/api/admin/service-logs': {
+      timeZone: 'Asia/Karachi',
+      logs: [{ id: 'l1', doctorId: 'clinic-one', doctorName: 'Dr. Haider', level: 'info', event: 'Startup', code: null, createdAt: '2026-10-07T00:00:00.000Z' }]
     }
   };
   const fetchStub = async (url, options = {}) => {
@@ -184,6 +240,7 @@ function createHarness() {
     setInterval,
     clearInterval,
     navigator: {},
+    prompt: () => null,
     location: { href: 'https://example.test/dashboard', search: '' },
     URLSearchParams,
     Promise
@@ -355,7 +412,34 @@ async function main() {
   }
   for (const message of doctor.errors) failures.push(`doctor session: ${message}`);
 
-  const admin = await renderAs({ role: 'SUPERADMIN', doctorId: null, doctorName: null, clinicName: null });
+  // The superadmin control panel mapped over the result of loadDoctors, which
+  // returned nothing. That threw "Cannot read properties of undefined (reading
+  // 'map')" and aborted the remaining panel loads, so the red banner appeared and
+  // appointments, analytics and system status never rendered.
+  const adminSession = { role: 'SUPERADMIN', doctorId: null, doctorName: null, clinicName: null };
+  const adminLoad = await renderAs(adminSession);
+  if (adminLoad.failure.message) {
+    failures.push(`superadmin panel failed to render -> ${adminLoad.failure.message}`);
+  }
+  const adminNotice = adminLoad.document.querySelector('#notice');
+  if (adminNotice.textContent) {
+    failures.push(`superadmin panel raised an error banner -> ${adminNotice.textContent}`);
+  }
+  for (const panel of ['#admin-overview-cards', '#admin-appointments', '#admin-analytics', '#admin-system-body']) {
+    const container = adminLoad.document.querySelector(panel);
+    if (container && container.children.length === 0) {
+      failures.push(`superadmin panel ${panel} rendered nothing after load`);
+    }
+  }
+  if (!adminLoad.requested.some((url) => url === '/api/admin/appointments')) {
+    failures.push('the superadmin appointments panel was never requested');
+  }
+  if (!adminLoad.requested.some((url) => url === '/api/admin/analytics')) {
+    failures.push('the superadmin analytics panel was never requested');
+  }
+
+  const admin2 = await renderAs(adminSession);
+  const admin = admin2;
   if (admin.failure.message) {
     failures.push(`superadmin session failed to render -> ${admin.failure.message}`);
   }

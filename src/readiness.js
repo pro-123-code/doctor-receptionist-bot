@@ -29,10 +29,25 @@ function hasConsent(environment, name) {
   return String(environment[name] ?? '').trim().toLowerCase() === 'true';
 }
 
+// A mounted persistent disk is what actually makes sessions survive a deploy, so
+// readiness reports ready when one is present even without the variable set.
+const DISK_ROOTS = ['/data', '/var/data', '/mnt/data'];
+
+function existsSyncSafe(target) {
+  try {
+    // Deliberately avoids pulling in fs at module scope so this stays pure enough
+    // to test with an injected existence check.
+    return require('node:fs').existsSync(target);
+  } catch {
+    return false;
+  }
+}
+
 // Evaluates every optional integration against an environment object. Pure, so it
 // can be unit tested and reused by the startup log and the admin system panel.
 function evaluateReadiness(environment = process.env, options = {}) {
   const features = {};
+  const diskRoots = options.diskRoots || DISK_ROOTS;
 
   const voiceMissing = requireVariables(environment, ['OPENAI_API_KEY']);
   const voiceConsent = hasConsent(environment, 'OPENAI_ALLOW_PHI_PROCESSING');
@@ -71,12 +86,16 @@ function evaluateReadiness(environment = process.env, options = {}) {
   };
 
   const sessionsMissing = requireVariables(environment, ['BAILEYS_AUTH_DIR']);
+  const diskMounted = diskRoots.some((candidate) => existsSyncSafe(candidate));
   features.whatsappSessions = {
-    ready: sessionsMissing.length === 0,
+    ready: (sessionsMissing.length === 0 || diskMounted) && (options.sessionWritable !== false),
     missing: sessionsMissing,
-    remedy: 'Attach a persistent disk in Render (Settings > Disks, mount path /data) and set BAILEYS_AUTH_DIR=/data/sessions, '
-      + 'then redeploy. Without this, every clinic must re-scan its WhatsApp QR code after each deploy. '
-      + 'Persistent disks require a paid Render plan.'
+    remedy: diskMounted
+      ? 'A persistent disk is mounted, so WhatsApp sessions already survive deploys. Set BAILEYS_AUTH_DIR to that '
+        + 'mount path anyway so the location is explicit and survives a disk remount.'
+      : 'Attach a persistent disk in Render (Settings > Disks, mount path /data) and set BAILEYS_AUTH_DIR=/data/sessions, '
+        + 'then redeploy. Without this, every clinic must re-scan its WhatsApp QR code after each deploy. '
+        + 'Persistent disks require a paid Render plan.'
   };
 
   const googleMissing = requireVariables(environment, ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']);
@@ -110,4 +129,4 @@ function evaluateReadiness(environment = process.env, options = {}) {
   return { features, blocked, ready: blocked.length === 0 };
 }
 
-module.exports = { FEATURE_LABELS, evaluateReadiness, requireVariables };
+module.exports = { DISK_ROOTS, FEATURE_LABELS, evaluateReadiness, requireVariables };

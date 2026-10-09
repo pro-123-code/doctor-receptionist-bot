@@ -398,7 +398,8 @@ test('dashboard appointment query is scoped to its clinic', async () => {
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     let appointmentFilter;
     const DashboardUser = mongoose.models.DashboardUser;
@@ -703,7 +704,8 @@ test('WhatsApp dashboard routes are doctor-scoped and return browser QR state', 
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     const qrState = { status: 'qr', qrDataUrl: 'data:image/png;base64,tenant-qr' };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId, {
@@ -783,7 +785,8 @@ test('clinic setup saves tenant schedule and gates WhatsApp pairing', async () =
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId, {
       async startWhatsAppConnection(doctorId) {
@@ -908,7 +911,8 @@ test('superadmin can edit an incomplete tenant profile and login email', async (
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', 'bootstrap-clinic');
     const token = createSessionToken(admin, secret, Date.now() + 60_000);
@@ -999,7 +1003,8 @@ test('superadmin can provision without facilities and edit the complete tenant p
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', 'bootstrap-clinic');
     const token = createSessionToken(admin, secret, Date.now() + 60_000);
@@ -1177,7 +1182,8 @@ test('doctor and superadmin sessions enforce dashboard roles', async () => {
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', 'doctor-tenant');
     const adminHandlers = routes.get('GET /api/admin/doctors');
@@ -1304,7 +1310,8 @@ test('Google Calendar OAuth uses shared config and stores the encrypted token pe
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
     const token = createSessionToken(user, process.env.DASHBOARD_SESSION_SECRET, Date.now() + 60_000);
@@ -1436,7 +1443,8 @@ test('OAuth callback reports a failure instead of success when the token cannot 
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
     const token = createSessionToken(user, process.env.DASHBOARD_SESSION_SECRET, Date.now() + 60_000);
@@ -1639,7 +1647,8 @@ test('clinic setup accepts facility-only or service-only pricing', async () => {
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
     const token = createSessionToken(user, secret, Date.now() + 60_000);
@@ -1734,7 +1743,8 @@ test('superadmin partial edits preserve untouched settings and recompute setup s
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', 'bootstrap-clinic');
     const token = createSessionToken(admin, secret, Date.now() + 60_000);
@@ -1807,7 +1817,8 @@ test('doctor settings can preview religious holidays for an unsaved religion', a
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
     const token = createSessionToken(user, secret, Date.now() + 60_000);
@@ -1961,7 +1972,8 @@ test('dashboard settings expose public legal page URLs', async () => {
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
     const token = createSessionToken(user, secret, Date.now() + 60_000);
@@ -2118,7 +2130,8 @@ test('WhatsApp dashboard warns when sessions sit on an ephemeral filesystem', as
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId, {
       getWhatsAppConnectionStatus: () => ({ status: 'connected' }),
@@ -2263,7 +2276,8 @@ test('doctor settings save and return clinic timings', async () => {
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
     const token = createSessionToken(user, secret, Date.now() + 60_000);
@@ -2350,7 +2364,8 @@ test('changing religion drops stale holiday overrides instead of blocking the sa
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
     const token = createSessionToken(user, secret, Date.now() + 60_000);
@@ -2417,7 +2432,8 @@ test('clinic setup reports which field is invalid', async () => {
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', user.doctorId);
     const token = createSessionToken(user, secret, Date.now() + 60_000);
@@ -2533,7 +2549,8 @@ test('superadmin overview, analytics, system and logs endpoints serve real data'
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, Appointment, 'Asia/Karachi', 'clinic-one', {
       getWhatsAppSessionInfo: () => ({ authDirectory: '/data/sessions', persistent: true, notice: null }),
@@ -2645,7 +2662,8 @@ test('doctor accounts cannot reach any superadmin control panel endpoint', async
       get(path, ...handlers) { routes.set(`GET ${path}`, handlers); },
       post(path, ...handlers) { routes.set(`POST ${path}`, handlers); },
       put(path, ...handlers) { routes.set(`PUT ${path}`, handlers); },
-      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); }
+      patch(path, ...handlers) { routes.set(`PATCH ${path}`, handlers); },
+      delete(path, ...handlers) { routes.set(`DELETE ${path}`, handlers); }
     };
     mountDashboard(app, {}, 'Asia/Karachi', doctor.doctorId);
     const token = createSessionToken(doctor, secret, Date.now() + 60_000);
@@ -2724,6 +2742,7 @@ test('the daily report scheduler survives a database failure without stopping', 
   clearInterval(scheduler);
   assert.equal(attempts, 1, 'a failed listing must not throw out of the tick');
 });
+const { existsSync } = require('node:fs');
 const { evaluateReadiness } = require('../src/readiness');
 
 const fullyConfigured = {
@@ -2816,4 +2835,139 @@ test('every blocked entry carries a label, its variables and a remedy', () => {
     assert.ok(Array.isArray(item.missing));
     assert.ok(item.remedy.length > 40, `${item.key} must explain how to fix itself`);
   }
+});
+function buildApp() {
+  const routes = new Map();
+  const app = {
+    use() {},
+    get: (p, ...h) => routes.set(`GET ${p}`, h),
+    post: (p, ...h) => routes.set(`POST ${p}`, h),
+    put: (p, ...h) => routes.set(`PUT ${p}`, h),
+    patch: (p, ...h) => routes.set(`PATCH ${p}`, h),
+    delete: (p, ...h) => routes.set(`DELETE ${p}`, h)
+  };
+  return { app, routes };
+}
+
+test('deleting a doctor requires the doctor id echoed back as confirmation', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'delete-doctor-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const Doctor = mongoose.models.Doctor;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const originalFindOne = Doctor.findOne;
+  const originalUserFindById = DashboardUser.findById;
+  let deleteCalls = 0;
+  Doctor.findOne = () => ({ select: () => ({ lean: async () => ({ doctorId: 'clinic-x', clinicName: 'Clinic X' }) }) });
+  DashboardUser.findById = () => ({ lean: async () => ({ _id: 'admin-1', role: 'SUPERADMIN', doctorId: null, isActive: true }) });
+
+  try {
+    const { app, routes } = buildApp();
+    mountDashboard(app, mongoose.models.Appointment, 'Asia/Karachi', 'clinic-x', {
+      getWhatsAppSessionInfo: () => ({ authDirectory: '/nonexistent-doctorbot-test-root', persistent: false })
+    });
+    const admin = { _id: 'admin-1', role: 'SUPERADMIN', doctorId: null, isActive: true };
+    const token = createSessionToken(admin, secret, Date.now() + 60_000);
+
+    const call = async (params, body) => {
+      const response = { locals: {}, statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; } };
+      const request = { headers: { cookie: `doctorbot_dashboard=${token}` }, query: {}, params, body };
+      const handlers = routes.get('DELETE /api/admin/doctors/:doctorId');
+      for (let i = 0; i < handlers.length; i += 1) {
+        const last = i === handlers.length - 1;
+        await handlers[i](request, response, () => {});
+        if (last || response.statusCode >= 400) break;
+      }
+      return response;
+    };
+
+    const noConfirmation = await call({ doctorId: 'clinic-x' }, {});
+    assert.equal(noConfirmation.statusCode, 400);
+    assert.equal(noConfirmation.body.requiresConfirmation, true);
+    assert.match(noConfirmation.body.error, /confirm/);
+
+    const wrongConfirmation = await call({ doctorId: 'clinic-x' }, { confirm: 'some-other-clinic' });
+    assert.equal(wrongConfirmation.statusCode, 400);
+    assert.equal(wrongConfirmation.body.requiresConfirmation, true);
+
+    const badId = await call({ doctorId: '../../etc/passwd' }, { confirm: '../../etc/passwd' });
+    assert.equal(badId.statusCode, 400);
+
+    assert.equal(deleteCalls, 0, 'no deletion may happen before the confirmation matches');
+  } finally {
+    Doctor.findOne = originalFindOne;
+    DashboardUser.findById = originalUserFindById;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
+test('a doctor session cannot delete any account', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'delete-guard-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const Doctor = mongoose.models.Doctor;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const originalDoctorFindOne = Doctor.findOne;
+  const originalUserFindById = DashboardUser.findById;
+  const doctorUser = { _id: 'doctor-1', role: 'DOCTOR', doctorId: 'clinic-y', isActive: true };
+  DashboardUser.findById = () => ({ lean: async () => doctorUser });
+  Doctor.findOne = () => ({
+    select: () => ({ lean: async () => ({ doctorId: doctorUser.doctorId, isActive: true, setupComplete: true }) }),
+    lean: async () => ({ doctorId: doctorUser.doctorId, isActive: true, setupComplete: true })
+  });
+
+  try {
+    const { app, routes } = buildApp();
+    mountDashboard(app, mongoose.models.Appointment, 'Asia/Karachi', doctorUser.doctorId);
+    const token = createSessionToken(doctorUser, secret, Date.now() + 60_000);
+    const response = { locals: {}, statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; } };
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` }, query: {},
+      params: { doctorId: 'clinic-y' }, body: { confirm: 'clinic-y' }
+    };
+    const handlers = routes.get('DELETE /api/admin/doctors/:doctorId');
+    for (let i = 0; i < handlers.length; i += 1) {
+      const last = i === handlers.length - 1;
+      await handlers[i](request, response, () => {});
+      if (last || response.statusCode >= 400) break;
+    }
+    assert.equal(response.statusCode, 403, 'a doctor must not be able to delete an account');
+  } finally {
+    Doctor.findOne = originalDoctorFindOne;
+    DashboardUser.findById = originalUserFindById;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+test('a mounted persistent disk satisfies session persistence without the variable', () => {
+  const noVariable = { ...fullyConfigured };
+  delete noVariable.BAILEYS_AUTH_DIR;
+
+  const withDisk = evaluateReadiness(noVariable, {
+    googleRedirectUriValid: true,
+    diskRoots: ['/tmp/doctorbot-test-disk']
+  });
+  const withoutDisk = evaluateReadiness(noVariable, {
+    googleRedirectUriValid: true,
+    diskRoots: ['/tmp/doctorbot-no-such-disk-xyz']
+  });
+  if (existsSync('/tmp/doctorbot-test-disk')) {
+    assert.equal(withDisk.features.whatsappSessions.ready, true,
+      'a real mounted disk means sessions already survive deploys');
+  } else {
+    assert.equal(withoutDisk.features.whatsappSessions.ready, false,
+      'without a disk the clinic still has to rescan its QR code');
+  }
+  assert.deepEqual(withDisk.features.whatsappSessions.missing, ['BAILEYS_AUTH_DIR'],
+    'the variable is still reported so the operator can make the path explicit');
+});
+
+test('an unwritable session folder is never reported as persistent', () => {
+  const result = evaluateReadiness(fullyConfigured, {
+    googleRedirectUriValid: true,
+    sessionWritable: false
+  });
+  assert.equal(result.features.whatsappSessions.ready, false,
+    'a read only folder cannot hold a session even on a persistent disk');
 });
