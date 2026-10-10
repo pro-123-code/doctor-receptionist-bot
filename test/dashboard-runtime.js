@@ -437,6 +437,20 @@ async function main() {
   if (!adminLoad.requested.some((url) => url === '/api/admin/analytics')) {
     failures.push('the superadmin analytics panel was never requested');
   }
+  // The clinic id has to land in its own column, because a half created account
+  // still shows the default names and the id is the only way to confirm a deletion.
+  const doctorTable = adminLoad.document.querySelector('#doctor-accounts');
+  const firstRow = doctorTable.children[0];
+  const idCell = firstRow && firstRow.children[3];
+  const idChip = idCell && idCell.children[0];
+  if (!idChip || idChip.textContent !== 'clinic-one') {
+    failures.push(`the doctor table does not show the clinic id in its own column -> ${idChip && idChip.textContent}`);
+  }
+  // Chip rendering after the inserted column reads fixed indexes.
+  const setupCell = firstRow && firstRow.children[6];
+  if (!setupCell || !setupCell.children[0] || setupCell.children[0].textContent !== 'Complete') {
+    failures.push('the setup chip is in the wrong column after adding the clinic id column');
+  }
 
   const admin2 = await renderAs(adminSession);
   const admin = admin2;

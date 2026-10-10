@@ -552,7 +552,7 @@
         <div class="overflow-x-auto">
           <table class="data">
             <thead>
-              <tr><th>Doctor</th><th>Clinic</th><th>Email</th><th>Total</th><th>Upcoming</th><th>Setup</th><th>Calendar</th><th>Status</th><th>Access</th></tr>
+              <tr><th>Doctor</th><th>Clinic</th><th>Email</th><th>Clinic ID</th><th>Total</th><th>Upcoming</th><th>Setup</th><th>Calendar</th><th>Status</th><th>Access</th></tr>
             </thead>
             <tbody id="doctor-accounts"></tbody>
           </table>
@@ -1542,11 +1542,17 @@ function readFacilityPricing() {
     // Deletion is permanent, so it is gated behind a typed confirmation and the
     // account is never removed without the doctor id echoed back to the server.
     function deleteDoctorAccount(doctor) {
-      const label = `${doctor.doctorName || 'this doctor'} (${doctor.clinicName || doctor.doctorId})`;
+      // Displayed names are unreliable here: an account created without real names
+      // shows the schema defaults "Doctor" and "Clinic". The clinic id is the only
+      // dependable identifier, so it is shown and pre-filled rather than guessed.
+      const label = `${doctor.doctorName || 'this doctor'} / ${doctor.clinicName || 'unnamed clinic'}`
+        + `${doctor.email ? ` (${doctor.email})` : ''}`;
       const confirmed = window.prompt(
-        `Permanently delete ${label}?\n\nThis removes the clinic, its appointments, conversations and WhatsApp `
-        + 'session. It cannot be undone.\n\nType the clinic ID to confirm:',
-        ''
+        `Permanently delete ${label}?\n\n`
+        + `Clinic ID: ${doctor.doctorId}\n\n`
+        + 'This removes the clinic, its appointments, conversations and WhatsApp session. It cannot be undone.\n\n'
+        + 'Press OK to confirm the deletion, or Cancel to leave the account alone.',
+        doctor.doctorId
       );
       if (confirmed === null) return;
       if (confirmed.trim() !== doctor.doctorId) {
@@ -1598,7 +1604,19 @@ function readFacilityPricing() {
           cell.textContent = String(value);
           row.append(cell);
         }
-        const statusCell = row.lastElementChild;
+        // The clinic id is the only reliable identifier, because a half created
+        // account still shows the default names "Doctor" and "Clinic". Showing it
+        // here means nobody has to guess it to confirm a deletion.
+        const idCell = row.children[3];
+        if (idCell) {
+          idCell.textContent = '';
+          const idChip = document.createElement('code');
+          idChip.className = 'rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700 select-all';
+          idChip.textContent = doctor.doctorId || '';
+          idCell.append(idChip);
+        }
+        // Cells after the inserted column shift by one.
+        const statusCell = row.children[7];
         if (statusCell) {
           statusCell.innerHTML = '';
           const chip = document.createElement('span');
@@ -1607,7 +1625,7 @@ function readFacilityPricing() {
           chip.textContent = active ? 'Active' : 'Inactive';
           statusCell.append(chip);
         }
-        const setupCell = row.children[5];
+        const setupCell = row.children[6];
         if (setupCell) {
           setupCell.textContent = '';
           const chip = document.createElement('span');
@@ -1615,7 +1633,7 @@ function readFacilityPricing() {
           chip.textContent = doctor.setupComplete ? 'Complete' : 'Pending';
           setupCell.append(chip);
         }
-        const calendarCell = row.children[6];
+        const calendarCell = row.children[5];
         if (calendarCell) {
           calendarCell.textContent = '';
           const chip = document.createElement('span');
