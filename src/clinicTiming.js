@@ -119,14 +119,48 @@ function isReportDueNow(doctorProfile, date = new Date(), timeZone = 'Asia/Karac
   return currentLocalTime(date, timeZone) === reportTime;
 }
 
+// Minutes after the saved report time during which the report may still be sent.
+// Matching one exact minute meant that a process suspended by a free tier sleep, a
+// deploy or a restart silently lost that day's report with no retry, because every
+// later tick saw a time that no longer matched.
+const DEFAULT_CATCH_UP_MINUTES = 180;
+
+function reportCatchUpMinutes(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 1440) return DEFAULT_CATCH_UP_MINUTES;
+  return parsed;
+}
+
+function currentLocalMinutes(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(date);
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value || '0');
+  const minute = Number(parts.find((part) => part.type === 'minute')?.value || '0');
+  return hour * 60 + minute;
+}
+
+function isReportCatchUpDue(doctorProfile, date = new Date(), timeZone = 'Asia/Karachi', catchUpMinutes = DEFAULT_CATCH_UP_MINUTES) {
+  const reportTime = normalizeReportTime(doctorProfile?.reportTime) ?? defaultReportTime;
+  const [reportHour, reportMinute] = reportTime.split(':').map(Number);
+  const elapsedMinutes = currentLocalMinutes(date, timeZone);
+  const window = reportCatchUpMinutes(catchUpMinutes);
+  return elapsedMinutes >= reportHour * 60 + reportMinute
+    && elapsedMinutes <= reportHour * 60 + reportMinute + window;
+}
+
 module.exports = {
+  DEFAULT_CATCH_UP_MINUTES,
   DEFAULTS,
   LIMITS,
+  currentLocalMinutes,
   currentLocalTime,
+  isReportCatchUpDue,
   isReportDueNow,
   isValidHourSetting,
   normalizeClinicTimingInput,
   normalizeReportTime,
+  reportCatchUpMinutes,
   resolveClinicTiming,
   resolveEnvironmentTiming
 };

@@ -3,7 +3,7 @@ const nodemailer = require('nodemailer');
 const { Appointment, claimDailyReportRun, completeDailyReportRun, Doctor, recordServiceLog } = require('./models');
 const { generateAppointmentsWorkbook } = require('./excelGenerator');
 const { getLocalDateParts } = require('./dateParser');
-const { isReportDueNow } = require('./clinicTiming');
+const { isReportCatchUpDue, reportCatchUpMinutes } = require('./clinicTiming');
 
 function reportError(error, doctorId, reason) {
   const code = /^[A-Za-z0-9_-]{1,64}$/.test(String(error?.code || ''))
@@ -120,16 +120,23 @@ async function dispatchDoctorDailyReport(doctorProfile, options = {}) {
 }
 
 // One shared scheduler for every clinic. Each tick dispatches the clinics whose
-// saved local report time matches the current minute.
+// report window is open. The window is deliberately wider than one minute: a
+// process suspended by a free tier sleep, restarted by a deploy or briefly stalled
+// must still deliver the day's report instead of losing it silently. The
+// DailyReportRun claim keeps a successful send to once per day, and a retry
+// delay stops a permanently failing clinic from retrying every tick.
 function startDailyReportScheduler(options = {}) {
   const timeZone = options.timeZone || 'Asia/Karachi';
   const tickMs = Number.isInteger(options.tickMs) ? options.tickMs : 60_000;
   const now = options.now || (() => new Date());
-  const isDue = options.isReportDueNow || isReportDueNow;
+  const isDue = options.isReportDueNow || isReportCatchUpDue;
+  const catchUpMinutes = options.catchUpMinutes ?? reportCatchUpMinutes(process.env.DAILY_REPORT_CATCHUP_MINUTES);
+  const retryDelayMs = Number.isInteger(options.retryDelayMs) ? options.retryDelayMs : 15 * 60 * 1000;
   const dispatch = options.dispatch || dispatchDoctorDailyReport;
   const listDoctors = options.listDoctors || (() => Doctor.find({ isActive: true }).lean());
   const transportContext = options.transportContext || createMailTransport();
   const inFlight = new Set();
+  const lastAttemptAt = new Map();
 
   const runTick = async () => {
     let doctors;
@@ -139,11 +146,16 @@ function startDailyReportScheduler(options = {}) {
       console.error(`Daily report scheduler could not list clinics (${error?.name || 'Error'})`);
       return;
     }
+    const checkedAt = now();
+    const stamp = checkedAt.getTime ? checkedAt.getTime() : Date.now();
     for (const doctor of doctors || []) {
-      if (!doctor?.doctorId || !isDue(doctor, now(), timeZone)) continue;
+      if (!doctor?.doctorId || !isDue(doctor, checkedAt, timeZone, catchUpMinutes)) continue;
       if (inFlight.has(doctor.doctorId)) continue;
+      const previousAttempt = lastAttemptAt.get(doctor.doctorId);
+      if (previousAttempt !== undefined && stamp - previousAttempt < retryDelayMs) continue;
       inFlight.add(doctor.doctorId);
-      Promise.resolve(dispatch(doctor, { timeZone, transportContext }))
+      lastAttemptAt.set(doctor.doctorId, stamp);
+      Promise.resolve(dispatch(doctor, { timeZone, transportContext, now: checkedAt }))
         .catch((error) => reportError(error, doctor.doctorId))
         .finally(() => inFlight.delete(doctor.doctorId));
     }
@@ -153,7 +165,8 @@ function startDailyReportScheduler(options = {}) {
   const timer = setInterval(() => { runTick().catch(() => {}); }, tickMs);
   timer.unref();
   runTick().catch(() => {});
-  console.log(`Daily appointment reports scheduled per clinic (checked every ${Math.round(tickMs / 1000)}s, ${timeZone})`);
+  console.log(`Daily appointment reports scheduled per clinic (checked every ${Math.round(tickMs / 1000)}s, `
+    + `${timeZone}, catch-up window ${catchUpMinutes} min)`);
   return timer;
 }
 

@@ -12,7 +12,7 @@ const { getReligiousHoliday, isClinicOpenOnDate, normalizeOffDays, normalizeWork
 const { enqueueInboundMessage, drainInboundQueue, getReceivedAt, messageRetentionMs } = require('../src/messageQueue');
 const { syncReligiousHolidayEvents } = require('../src/religiousCalendar');
 const { convertWhatsAppAudioToWav, getVoiceFileExtension, isVoiceErrorRetryable, translateVoiceMessageToEnglish } = require('../src/voiceTranscription');
-const { createGoogleOAuthState, createSessionToken, getGoogleCalendarConfigurationError, mountDashboard, resolveGoogleRedirectUri, verifyGoogleOAuthState, verifySessionToken } = require('../src/dashboard');
+const { createGoogleOAuthState, createSessionToken, getGoogleCalendarConfigurationError, getGoogleCalendarOAuthStatus, mountDashboard, normalizeAdminDoctorPatch, resolveGoogleRedirectUri, verifyGoogleOAuthState, verifySessionToken } = require('../src/dashboard');
 const { generateAppointmentsWorkbook } = require('../src/excelGenerator');
 const { getCalendarErrorDetails } = require('../src/calendarErrors');
 const { getWelcomeMessage } = require('../src/greetings');
@@ -24,7 +24,7 @@ const { resolveGoogleCredentials, verifyDoctorCalendarAccess } = require('../src
 const { createMailTransport, dispatchDoctorDailyReport, startDailyReportScheduler } = require('../src/cronJobs');
 const { privacyPolicy, termsOfService } = require('../src/legalPages');
 const { buildOfferOrder, formatSlotOffer, getSlotLocalDateKey, getZonedDateParts, isMoreSlotRequest, paginateSlots } = require('../src/slotOffers');
-const { currentLocalTime, isReportDueNow, normalizeClinicTimingInput, normalizeReportTime, resolveClinicTiming } = require('../src/clinicTiming');
+const { currentLocalTime, isReportCatchUpDue, isReportDueNow, normalizeClinicTimingInput, normalizeReportTime, reportCatchUpMinutes, resolveClinicTiming } = require('../src/clinicTiming');
 
 require('../src/models');
 
@@ -2970,4 +2970,102 @@ test('an unwritable session folder is never reported as persistent', () => {
   });
   assert.equal(result.features.whatsappSessions.ready, false,
     'a read only folder cannot hold a session even on a persistent disk');
+});
+test('a report is still due after its minute passes, so a sleeping process recovers it', async () => {
+  assert.equal(isReportCatchUpDue({ reportTime: '07:30' }, new Date('2026-10-07T02:30:00Z'), 'Asia/Karachi'), true);
+  // 07:31 local: the exact-minute match is already false here, which is why the
+  // report used to be lost whenever a tick was missed.
+  assert.equal(isReportDueNow({ reportTime: '07:30' }, new Date('2026-10-07T02:31:00Z'), 'Asia/Karachi'), false);
+  assert.equal(isReportCatchUpDue({ reportTime: '07:30' }, new Date('2026-10-07T02:31:00Z'), 'Asia/Karachi'), true);
+  // Still inside the default three hour window.
+  assert.equal(isReportCatchUpDue({ reportTime: '07:30' }, new Date('2026-10-07T05:00:00Z'), 'Asia/Karachi'), true);
+  // Window closed, so a clinic is not mailed at midnight the next day.
+  assert.equal(isReportCatchUpDue({ reportTime: '07:30' }, new Date('2026-10-07T12:00:00Z'), 'Asia/Karachi'), false);
+  // Before the report time it is never due.
+  assert.equal(isReportCatchUpDue({ reportTime: '07:30' }, new Date('2026-10-07T01:00:00Z'), 'Asia/Karachi'), false);
+  assert.equal(isReportCatchUpDue({ reportTime: '00:00' }, new Date('2026-10-07T02:00:00Z'), 'Asia/Karachi'), false,
+    'a midnight report must not be retried hours later');
+  assert.equal(reportCatchUpMinutes('not a number'), 180);
+  assert.equal(reportCatchUpMinutes('9999'), 180);
+  assert.equal(reportCatchUpMinutes('30'), 30);
+});
+
+test('the scheduler catches up a missed window and stops retrying a failing clinic', async () => {
+  const dispatched = [];
+  // The process was asleep through 07:30 and only wakes at 07:33.
+  let current = new Date('2026-10-07T02:33:00Z');
+  const scheduler = startDailyReportScheduler({
+    timeZone: 'Asia/Karachi',
+    tickMs: 60_000,
+    now: () => current,
+    retryDelayMs: 15 * 60 * 1000,
+    listDoctors: async () => [{ doctorId: 'sleeper', reportTime: '07:30' }],
+    dispatch: (doctor) => {
+      dispatched.push(doctor.doctorId);
+      return Promise.resolve({ sent: false, reason: 'smtp down' });
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(dispatched, ['sleeper'],
+    'a window missed while the process slept must still deliver the report');
+
+  // Ticking again inside the retry delay must not hammer a failing SMTP server.
+  current = new Date('2026-10-07T02:34:00Z');
+  for (let tick = 0; tick < 3; tick += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  assert.equal(dispatched.length, 1, 'a failing clinic must back off instead of retrying every tick');
+
+  clearInterval(scheduler);
+});
+
+test('a clinic outside its report window is never dispatched', async () => {
+  const dispatched = [];
+  const scheduler = startDailyReportScheduler({
+    timeZone: 'Asia/Karachi',
+    tickMs: 60_000,
+    now: () => new Date('2026-10-07T02:30:00Z'),
+    listDoctors: async () => [
+      { doctorId: 'due', reportTime: '07:30' },
+      { doctorId: 'later', reportTime: '19:00' }
+    ],
+    dispatch: (doctor) => {
+      dispatched.push(doctor.doctorId);
+      return Promise.resolve({ sent: true });
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  clearInterval(scheduler);
+  assert.deepEqual(dispatched, ['due']);
+});
+
+test('the superadmin save drops a stale holiday override instead of refusing everything', () => {
+  const existing = {
+    doctorId: 'clinic-holiday',
+    doctorName: 'Dr. Holiday',
+    clinicName: 'Holiday Clinic',
+    religion: 'Muslim',
+    basicCheckupFee: 500,
+    facilityPricing: [{ category: 'facility', name: 'Consultation', price: 500 }],
+    consultationDetails: 'Consultation charges Rs. 1500',
+    workingDays: [1, 2, 3, 4, 5],
+    offDays: [],
+    welcomeMessage: 'Welcome',
+    religiousHolidayOpenDays: []
+  };
+  // A date that is not a holiday for the selected religion. The doctor save path
+  // filters this out; the admin path used to reject the entire save.
+  const stale = '2026-01-01';
+  const patch = normalizeAdminDoctorPatch({
+    clinicName: 'Holiday Clinic Renamed',
+    religiousHolidayOpenDays: [stale]
+  }, existing);
+
+  assert.ok(patch, 'a stale holiday override must not block the rest of the save');
+  assert.equal(patch.clinicName, 'Holiday Clinic Renamed');
+  assert.deepEqual(patch.religiousHolidayOpenDays, []);
+  assert.equal(patch.droppedHolidayOverrides, 1);
+  // The count must never be written to the profile.
+  assert.equal(Object.keys(patch).includes('droppedHolidayOverrides'), true,
+    'the caller reads the count and strips it before the database write');
 });

@@ -398,8 +398,12 @@ function normalizeAdminDoctorPatch(body = {}, existingDoctor = {}) {
     ]);
     const knownHolidayDates = new Set([...holidayYears]
       .flatMap((year) => getReligiousHolidays(mergedReligion, year).map(({ date }) => date)));
-    if (religiousHolidayOpenDays.some((date) => !knownHolidayDates.has(date))) return null;
-    patch.religiousHolidayOpenDays = religiousHolidayOpenDays;
+    // An override only means something for the selected religion. Dropping the
+    // stale ones matches the doctor save path; rejecting them here made the
+    // superadmin unable to save any other field on a clinic that had an override
+    // saved under a different religion.
+    patch.religiousHolidayOpenDays = religiousHolidayOpenDays.filter((date) => knownHolidayDates.has(date));
+    patch.droppedHolidayOverrides = religiousHolidayOpenDays.length - patch.religiousHolidayOpenDays.length;
   }
 
   patch.updatedAt = new Date();
@@ -990,6 +994,9 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       if (!existingDoctor) return response.status(404).json({ error: 'Doctor not found' });
 
       const patch = normalizeAdminDoctorPatch(request.body || {}, existingDoctor);
+      // The count is for the response only and must never reach the database.
+      const droppedHolidayOverrides = patch ? Number(patch.droppedHolidayOverrides || 0) : 0;
+      if (patch) delete patch.droppedHolidayOverrides;
       const emailProvided = request.body?.email !== undefined;
       const email = emailProvided && typeof request.body.email === 'string'
         ? request.body.email.trim().toLowerCase()
@@ -1034,7 +1041,7 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         religion: updatedDoctor.religion,
         setupComplete: updatedDoctor.setupComplete,
         welcomeMessage: updatedDoctor.welcomeMessage
-      } });
+      }, droppedHolidayOverrides });
     } catch (error) {
       if (error.code === 11000) return response.status(409).json({ error: 'Doctor email is already in use.' });
       console.error(`Admin doctor profile update failed (${error?.name || 'Error'})`);
