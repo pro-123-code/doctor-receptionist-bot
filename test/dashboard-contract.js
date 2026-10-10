@@ -81,7 +81,8 @@ for (const endpoint of ['/api/dashboard/login', '/api/dashboard/logout', '/api/d
   '/api/dashboard/whatsapp/connect', '/api/dashboard/calendar/status', '/api/dashboard/calendar/settings',
   '/api/dashboard/calendar/disconnect', '/api/admin/doctors',
   '/api/admin/overview', '/api/admin/appointments', '/api/admin/analytics', '/api/admin/system',
-  '/api/admin/service-logs', '/api/admin/diagnostics/voice', '/api/admin/doctors/${encodeURIComponent']) {
+  '/api/admin/service-logs', '/api/admin/diagnostics/voice', '/api/admin/diagnostics/email',
+  '/api/admin/doctors/${encodeURIComponent']) {
   if (!inline.includes(endpoint)) {
     console.error(`dashboard: script no longer calls ${endpoint}`);
     process.exit(1);
@@ -99,11 +100,12 @@ for (const match of serverSource.matchAll(/app\.(get|post|put|patch|delete)\('(\
   }
 }
 const adminRoutes = [...serverSource.matchAll(/app\.(get|post|put|patch|delete)\('\/api\/admin\//g)].length;
-if (adminRoutes < 12) {
+if (adminRoutes < 13) {
   console.error(`server: expected a full control panel, found only ${adminRoutes} admin routes`);
   process.exit(1);
 }
-for (const id of ['clinic-report-time', 'admin-voice-test', 'admin-voice-result', 'admin-remediation']) {
+for (const id of ['clinic-report-time', 'admin-voice-test', 'admin-voice-result', 'admin-remediation',
+  'admin-email-test', 'admin-email-send', 'admin-email-result']) {
   if (!requiredIds.includes(id) && !html.includes(`id="${id}"`)) {
     console.error(`dashboard: required element ${id} is missing`);
     process.exit(1);

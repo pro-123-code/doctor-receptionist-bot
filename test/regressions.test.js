@@ -2744,6 +2744,7 @@ test('the daily report scheduler survives a database failure without stopping', 
 });
 const { existsSync } = require('node:fs');
 const { evaluateReadiness } = require('../src/readiness');
+const { describeEmailConfiguration, diagnoseEmailPipeline, explainSmtpFailure } = require('../src/emailDiagnostics');
 
 const fullyConfigured = {
   OPENAI_API_KEY: 'sk-live-abcdef123456',
@@ -3068,4 +3069,124 @@ test('the superadmin save drops a stale holiday override instead of refusing eve
   // The count must never be written to the profile.
   assert.equal(Object.keys(patch).includes('droppedHolidayOverrides'), true,
     'the caller reads the count and strips it before the database write');
+});
+test('email configuration reports missing settings without revealing any value', () => {
+  const empty = describeEmailConfiguration({});
+  assert.equal(empty.ready, false);
+  assert.deepEqual(empty.missing, ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM']);
+  assert.equal(empty.host, null);
+  assert.equal(empty.from, null);
+
+  const configured = describeEmailConfiguration({
+    SMTP_HOST: 'smtp.gmail.com',
+    SMTP_PORT: '587',
+    SMTP_USER: 'reports@example.test',
+    SMTP_PASS: 'app-password-value',
+    EMAIL_FROM: 'reports@example.test'
+  });
+  assert.equal(configured.ready, true);
+  assert.deepEqual(configured.missing, []);
+  assert.equal(configured.host, 'smtp.gmail.com');
+  assert.equal(configured.port, 587);
+  assert.equal(configured.secure, false, 'port 587 uses STARTTLS rather than implicit TLS');
+  assert.equal(configured.requiresTls, true);
+
+  // Whitespace must count as absent, and a bad port must be reported.
+  assert.ok(describeEmailConfiguration({ SMTP_HOST: '   ' }).missing.includes('SMTP_HOST'),
+    'a whitespace only host must count as missing');
+  assert.ok(describeEmailConfiguration({
+    SMTP_HOST: 'h', SMTP_USER: 'u', SMTP_PASS: 'p', EMAIL_FROM: 'e', SMTP_PORT: 'nope'
+  }).missing.includes('SMTP_PORT'));
+
+  const implicitTls = describeEmailConfiguration({
+    SMTP_HOST: 'smtp.example.test', SMTP_USER: 'u', SMTP_PASS: 'p', EMAIL_FROM: 'e', SMTP_PORT: '465'
+  });
+  assert.equal(implicitTls.secure, true);
+  assert.equal(implicitTls.requiresTls, false, 'port 465 already uses TLS so STARTTLS must be off');
+
+  const serialised = JSON.stringify(describeEmailConfiguration({
+    SMTP_HOST: 'smtp.gmail.com', SMTP_USER: 'reports@example.test',
+    SMTP_PASS: 'super-secret-app-password', EMAIL_FROM: 'reports@example.test'
+  }));
+  assert.ok(!serialised.includes('super-secret-app-password'), 'the SMTP password must never be returned');
+});
+
+test('SMTP failures are explained as something an operator can act on', () => {
+  assert.match(explainSmtpFailure({ code: 'EAUTH', message: 'Invalid credentials' }), /App Password/);
+  assert.match(explainSmtpFailure({ code: 'ECONNREFUSED', message: 'connect' }), /outbound port/);
+  assert.match(explainSmtpFailure({ code: 'ETIMEDOUT', message: 'Connection timeout' }), /firewall/);
+  assert.match(explainSmtpFailure({ message: 'self signed certificate in certificate chain' }), /SMTP_SECURE/);
+  assert.equal(explainSmtpFailure({ message: 'something exotic happened' }), 'something exotic happened');
+});
+
+test('the email diagnostic stops at configuration and never opens a connection when it is incomplete', async () => {
+  const originalCreateTransport = nodemailer.createTransport;
+  let created = false;
+  nodemailer.createTransport = () => {
+    created = true;
+    throw new Error('should not be reached');
+  };
+  try {
+    const result = await diagnoseEmailPipeline({ environment: {} });
+    assert.equal(result.ready, false);
+    assert.equal(created, false, 'an incomplete configuration must not attempt a connection');
+    assert.deepEqual(result.stages.map((stage) => stage.stage), ['configuration']);
+    assert.match(result.stages[0].detail, /SMTP_HOST/);
+  } finally {
+    nodemailer.createTransport = originalCreateTransport;
+  }
+});
+
+test('the email diagnostic reports a reachable server without sending unless asked', async () => {
+  const originalCreateTransport = nodemailer.createTransport;
+  let sent = 0;
+  let verified = 0;
+  nodemailer.createTransport = () => ({
+    async verify() { verified += 1; return true; },
+    async sendMail() { sent += 1; return { messageId: 'test-1' }; }
+  });
+  const environment = {
+    SMTP_HOST: 'smtp.example.test', SMTP_PORT: '587',
+    SMTP_USER: 'u', SMTP_PASS: 'p', EMAIL_FROM: 'reports@example.test'
+  };
+  try {
+    const check = await diagnoseEmailPipeline({ environment });
+    assert.equal(check.ready, true);
+    assert.equal(verified, 1, 'the transporter must actually be verified');
+    assert.equal(sent, 0, 'a status check must never send mail');
+    assert.deepEqual(check.stages.map((stage) => stage.stage), ['configuration', 'smtp-connection', 'delivery']);
+
+    const delivered = await diagnoseEmailPipeline({ environment, send: true });
+    assert.equal(delivered.ready, true);
+    assert.equal(sent, 1, 'an explicit test must send exactly one message');
+  } finally {
+    nodemailer.createTransport = originalCreateTransport;
+  }
+});
+
+test('the email diagnostic surfaces an authentication failure with a usable remedy', async () => {
+  const originalCreateTransport = nodemailer.createTransport;
+  nodemailer.createTransport = () => ({
+    async verify() {
+      throw Object.assign(new Error('Invalid credentials: 535'), { code: 'EAUTH' });
+    },
+    async sendMail() { throw new Error('should not send'); }
+  });
+  try {
+    const result = await diagnoseEmailPipeline({
+      environment: {
+        SMTP_HOST: 'smtp.gmail.com', SMTP_PORT: '587',
+        SMTP_USER: 'u', SMTP_PASS: 'wrong', EMAIL_FROM: 'reports@example.test'
+      },
+      send: true
+    });
+    assert.equal(result.ready, false);
+    const connection = result.stages.find((stage) => stage.stage === 'smtp-connection');
+    assert.equal(connection.ok, false);
+    assert.match(connection.detail, /App Password/);
+    assert.equal(result.stages.some((stage) => stage.stage === 'delivery'), false,
+      'a rejected connection must not be reported as a delivery attempt');
+  } finally {
+    nodemailer.createTransport = originalCreateTransport;
+  }
 });

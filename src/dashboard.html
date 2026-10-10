@@ -509,6 +509,12 @@
         <div id="admin-remediation" class="px-5 sm:px-6 pb-5 sm:pb-6 space-y-3" hidden></div>
         <div class="px-5 sm:px-6 pb-5 sm:pb-6">
           <div class="flex flex-wrap items-center gap-3">
+            <button id="admin-email-test" class="btn btn-ghost btn-sm" type="button">Test email delivery</button>
+            <button id="admin-email-send" class="btn btn-ghost btn-sm" type="button">Send a test message</button>
+            <p class="hint">Checks the SMTP host, TLS and credentials, then optionally sends one real message so a broken configuration is found now rather than the next morning.</p>
+          </div>
+          <div id="admin-email-result" class="mt-3 space-y-1 text-sm"></div>
+          <div class="flex flex-wrap items-center gap-3 mt-4">
             <button id="admin-voice-test" class="btn btn-ghost btn-sm" type="button">Test voice transcription</button>
             <p class="hint">Runs the WhatsApp audio pipeline with a generated tone, so you can see exactly which stage fails.</p>
           </div>
@@ -611,6 +617,9 @@
     const adminLogsEmpty = document.querySelector('#admin-logs-empty');
     const adminVoiceResult = document.querySelector('#admin-voice-result');
     const adminVoiceTest = document.querySelector('#admin-voice-test');
+    const adminEmailResult = document.querySelector('#admin-email-result');
+    const adminEmailTest = document.querySelector('#admin-email-test');
+    const adminEmailSend = document.querySelector('#admin-email-send');
     const statToday = document.querySelector('#stat-today');
     const statTodayLabel = document.querySelector('#stat-today-label');
     const statHours = document.querySelector('#stat-hours');
@@ -680,6 +689,18 @@
 // field must render an empty panel, never crash the whole dashboard.
 function asArray(value) {
       return Array.isArray(value) ? value : [];
+    }
+
+    function renderDiagnosticStages(container, stages) {
+      container.replaceChildren();
+      for (const stage of asArray(stages)) {
+        const row = document.createElement('p');
+        const tag = document.createElement('span');
+        tag.className = stage.ok ? 'chip chip-teal' : 'chip !bg-rose-50 !text-rose-700 !border-rose-200';
+        tag.textContent = stage.ok ? 'pass' : 'fail';
+        row.append(`${stage.stage}: `, tag, ` ${stage.detail}`);
+        container.append(row);
+      }
     }
 
     function statCard(label, value, caption) {
@@ -896,20 +917,35 @@ function asArray(value) {
 
       const voiceResult = adminVoiceResult;
       adminVoiceResult.replaceChildren();
+      renderDiagnosticStages(adminEmailResult, null);
+      const runEmailTest = async (send) => {
+        adminEmailTest.disabled = true;
+        adminEmailSend.disabled = true;
+        adminEmailResult.textContent = send
+          ? 'Sending a test message...'
+          : 'Checking the SMTP connection...';
+        try {
+          const diagnostic = await adminFetch('/api/admin/diagnostics/email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ send })
+          });
+          renderDiagnosticStages(adminEmailResult, diagnostic.stages);
+        } catch (error) {
+          adminEmailResult.textContent = error.message;
+        } finally {
+          adminEmailTest.disabled = false;
+          adminEmailSend.disabled = false;
+        }
+      };
+      adminEmailTest.onclick = () => runEmailTest(false);
+      adminEmailSend.onclick = () => runEmailTest(true);
       const button = adminVoiceTest;
       button.disabled = true;
       voiceResult.textContent = 'Running the voice pipeline test...';
       try {
         const diagnostic = await adminFetch('/api/admin/diagnostics/voice', { method: 'POST' });
-        voiceResult.replaceChildren();
-        for (const stage of diagnostic.stages) {
-          const row = document.createElement('p');
-          const tag = document.createElement('span');
-          tag.className = stage.ok ? 'chip chip-teal' : 'chip !bg-rose-50 !text-rose-700 !border-rose-200';
-          tag.textContent = stage.ok ? 'pass' : 'fail';
-          row.append(`${stage.stage}: `, tag, ` ${stage.detail}`);
-          voiceResult.append(row);
-        }
+        renderDiagnosticStages(voiceResult, diagnostic.stages);
       } catch (error) {
         voiceResult.textContent = error.message;
       } finally {

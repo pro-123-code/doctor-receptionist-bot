@@ -10,6 +10,7 @@ const { encryptJson, hasValidEncryptionKey } = require('./secretBox');
 const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
 const { getReligiousHolidays } = require('./clinicSchedule');
 const { isValidRupeeAmount, normalizeFacilityPricing } = require('./facilityPricing');
+const { diagnoseEmailPipeline } = require('./emailDiagnostics');
 const { diagnoseVoicePipeline } = require('./voiceTranscription');
 const { evaluateReadiness } = require('./readiness');
 const { normalizeClinicTimingInput, normalizeReportTime, resolveClinicTiming } = require('./clinicTiming');
@@ -1461,6 +1462,28 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     } catch (error) {
       console.error(`Doctor account deletion failed (${error?.name || 'Error'})`);
       response.status(503).json({ error: 'Doctor account could not be deleted' });
+    }
+  });
+
+  app.post('/api/admin/diagnostics/email', requireDashboardAuth, requireSuperadmin, async (request, response) => {
+    try {
+      const result = await diagnoseEmailPipeline({
+        // Sending is opt-in and defaults to off so a status refresh never mails anyone.
+        send: request.body?.send === true,
+        sendTo: request.body?.sendTo
+      });
+      response.json({
+        ready: result.ready,
+        stages: result.stages,
+        // Presence and topology only, never the credentials.
+        host: result.configuration?.host || null,
+        port: result.configuration?.port || null,
+        secure: result.configuration?.secure === true,
+        requiresTls: result.configuration?.requiresTls === true
+      });
+    } catch (error) {
+      console.error(`Email diagnostics failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Email diagnostics could not run' });
     }
   });
 
