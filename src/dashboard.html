@@ -1751,8 +1751,14 @@ function readFacilityPricing() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
+        // Read the body once, before the status check. Declaring it inside the
+        // failure branch left it out of scope on the success path, so a save that
+        // worked still raised "result is not defined" and showed an error banner.
+        // Read the body once, before the status check. Declaring it inside the
+        // failure branch left it out of scope on the success path, so a save that
+        // worked still raised "result is not defined" and showed an error banner.
+        const result = await response.json().catch(() => ({}));
         if (!response.ok) {
-          const result = await response.json();
           throw new Error(result.error || 'Could not save clinic setup.');
         }
         notice.hidden = true;

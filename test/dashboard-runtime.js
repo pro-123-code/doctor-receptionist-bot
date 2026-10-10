@@ -296,7 +296,12 @@ async function submitForm(session, mutateRows) {
   await form.handlers.submit({ preventDefault() {} });
   for (let tick = 0; tick < 6; tick += 1) await new Promise((resolve) => setTimeout(resolve, 5));
   const notice = harness.document.querySelector('#notice');
-  return { harness, message: notice.textContent, save: harness.bodies.find((body) => body.method === 'PUT') };
+  return {
+    harness,
+    message: notice.textContent,
+    save: harness.bodies.find((body) => body.method === 'PUT'),
+    notice
+  };
 }
 
 function rowByName(document, name) {
@@ -345,6 +350,13 @@ async function main() {
       }
       if (save.payload?.reportTime !== '07:30') {
         failures.push(`save lost the daily report time -> ${save.payload?.reportTime}`);
+      }
+      // A save that reached the server must not also leave an error banner. The
+      // handler catches its own errors, so a broken success path shows up here as
+      // a ReferenceError message rather than as a failed test.
+      const submitNotice = submit.document.querySelector('#notice');
+      if (submitNotice.textContent) {
+        failures.push(`a successful clinic setup save raised an error banner -> ${submitNotice.textContent}`);
       }
       // The captured payload is the one the browser would really send, so running
       // it through the server validator proves the two halves agree. A mismatch
@@ -468,6 +480,23 @@ async function main() {
   }
   if (roleless.requested.some((url) => url.startsWith('/api/admin/'))) {
     failures.push('a session without a role requested an admin endpoint');
+  }
+
+  // The superadmin edit path runs the same submit handler, so a broken success
+  // path there would also raise an error banner rather than failing loudly.
+  const adminSave = await renderAs(adminSession);
+  if (!adminSave.failure.message) {
+    const clinicName = adminSave.document.querySelector('#profile-clinic-name');
+    if (clinicName) clinicName.value = 'Renamed Clinic';
+    const adminForm = adminSave.document.querySelector('#doctor-settings-form');
+    if (typeof adminForm.handlers.submit === 'function') {
+      await adminForm.handlers.submit({ preventDefault() {} });
+      for (let tick = 0; tick < 6; tick += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      const adminNotice = adminSave.document.querySelector('#notice');
+      if (adminNotice.textContent) {
+        failures.push(`a superadmin clinic save raised an error banner -> ${adminNotice.textContent}`);
+      }
+    }
   }
 
   const sweep = await sweepForScopeErrors();
