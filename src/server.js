@@ -151,7 +151,9 @@ mountDashboard(app, Appointment, timeZone, doctorId, {
   syncReligiousHolidays: syncDoctorReligiousHolidays
 });
 
-function logServiceError(operation, error, sensitiveValues = [], targetDoctorId = doctorId) {
+// `level` lets an optional enhancement be recorded as a warning instead of
+// counting against the clinic's error metrics in the analytics panel.
+function logServiceError(operation, error, sensitiveValues = [], targetDoctorId = doctorId, level = 'error') {
   const isCalendarOperation = /^Calendar\b/.test(operation);
   const details = isCalendarOperation
     ? getCalendarErrorDetails(error)
@@ -167,7 +169,7 @@ function logServiceError(operation, error, sensitiveValues = [], targetDoctorId 
   const codeLabel = code ? ` [${code}]` : '';
   const messageLabel = message ? `: ${message}` : '';
   console.error(`${operation} failed (${error?.name || 'Error'})${statusLabel}${codeLabel}${messageLabel}`);
-  recordServiceLog(operation, code, targetDoctorId);
+  recordServiceLog(operation, code, targetDoctorId, level);
 }
 
 function getCalendarClient(doctorProfile) {
@@ -685,7 +687,9 @@ async function handleConversationMessage(sender, message, doctorProfile) {
       try {
         selectedSlotNumber = await extractSlotNumber(normalizedMessage, conversation.slots, formatSlot, doctorProfile);
       } catch (error) {
-        logServiceError('Gemini appointment selection', error, [], targetDoctorId);
+        // Extraction only improves on the manual prompts, so a provider failure
+        // must not be recorded as a clinic level error.
+        logServiceError('Gemini appointment selection', error, [], targetDoctorId, 'warn');
       }
     }
     if (!Number.isInteger(selectedSlotNumber) || selectedSlotNumber < 1) {
@@ -793,7 +797,9 @@ async function handleConversationMessage(sender, message, doctorProfile) {
     try {
       extractedValue = await extractPatientField(conversation.step, normalizedMessage, doctorProfile);
     } catch (error) {
-      logServiceError('Gemini field extraction', error, [], targetDoctorId);
+      // The conversation falls back to asking the patient, so this is a warning
+      // rather than an error on the clinic.
+      logServiceError('Gemini field extraction', error, [], targetDoctorId, 'warn');
     }
   }
   const patientValue = extractedValue && validatePatientInput(conversation.step, extractedValue)

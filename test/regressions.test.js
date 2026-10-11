@@ -3300,3 +3300,166 @@ test('a doctor clinic setup save persists the daily report time', async () => {
     else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
   }
 });
+test('the superadmin clinic setup save persists the daily report time', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'admin-report-time-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const Doctor = mongoose.models.Doctor;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const originalUserFindById = DashboardUser.findById;
+  const originalDoctorFindOne = Doctor.findOne;
+  const originalFindOneAndUpdate = Doctor.findOneAndUpdate;
+
+  const doctor = {
+    doctorId: 'clinic-admin-time', doctorName: 'Dr. Admin', clinicName: 'Admin Time Clinic',
+    email: 'admin-time@example.test', religion: 'Muslim', basicCheckupFee: 500,
+    facilityPricing: [{ category: 'facility', name: 'Consultation', price: 500 }],
+    consultationDetails: 'Consultation charges Rs. 1500', workingDays: [1, 2, 3, 4, 5],
+    offDays: [], welcomeMessage: 'Welcome', religiousHolidayOpenDays: [],
+    officeStartHour: 9, officeEndHour: 17, appointmentDurationMinutes: 30,
+    appointmentLookaheadDays: 14, reportTime: '00:00', isActive: true
+  };
+  let persisted;
+
+  DashboardUser.findById = () => ({ lean: async () => ({ _id: 'a1', role: 'SUPERADMIN', doctorId: null, isActive: true }) });
+  Doctor.findOne = () => ({ lean: async () => ({ ...doctor }) });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    persisted = update.$set;
+    return { lean: async () => ({ ...doctor, ...update.$set }) };
+  };
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get: (p, ...h) => routes.set(`GET ${p}`, h),
+      post: (p, ...h) => routes.set(`POST ${p}`, h),
+      put: (p, ...h) => routes.set(`PUT ${p}`, h),
+      patch: (p, ...h) => routes.set(`PATCH ${p}`, h),
+      delete: (p, ...h) => routes.set(`DELETE ${p}`, h)
+    };
+    mountDashboard(app, mongoose.models.Appointment, 'Asia/Karachi', null, {
+      getWhatsAppSessionInfo: () => ({ authDirectory: '/tmp/doctorbot-admin-time', persistent: true })
+    });
+    const token = createSessionToken(
+      { _id: 'a1', role: 'SUPERADMIN', doctorId: null, isActive: true }, secret, Date.now() + 60_000
+    );
+
+    const send = async (body) => {
+      const response = {
+        locals: {}, statusCode: 200,
+        status(c) { this.statusCode = c; return this; },
+        json(b) { this.body = b; }
+      };
+      const request = {
+        headers: { cookie: `doctorbot_dashboard=${token}` }, query: {},
+        params: { doctorId: doctor.doctorId }, body
+      };
+      const handlers = routes.get('PUT /api/admin/doctors/:doctorId');
+      for (let i = 0; i < handlers.length; i += 1) {
+        const last = i === handlers.length - 1;
+        await handlers[i](request, response, () => {});
+        if (last || response.statusCode >= 400) break;
+      }
+      return response;
+    };
+
+    const base = {
+      doctorName: doctor.doctorName,
+      clinicName: doctor.clinicName,
+      religion: doctor.religion,
+      basicCheckupFee: doctor.basicCheckupFee,
+      facilityPricing: doctor.facilityPricing,
+      consultationDetails: doctor.consultationDetails,
+      workingDays: doctor.workingDays,
+      offDays: doctor.offDays,
+      religiousHolidayOpenDays: doctor.religiousHolidayOpenDays,
+      welcomeMessage: doctor.welcomeMessage,
+      officeStartHour: doctor.officeStartHour,
+      officeEndHour: doctor.officeEndHour,
+      appointmentDurationMinutes: doctor.appointmentDurationMinutes,
+      appointmentLookaheadDays: doctor.appointmentLookaheadDays,
+      reportTime: '07:30'
+    };
+
+    const saved = await send(base);
+    assert.equal(saved.statusCode, 200, JSON.stringify(saved.body));
+    assert.equal(persisted.reportTime, '07:30',
+      'the superadmin save must persist the report time the doctor configured');
+    assert.equal(saved.body.doctor.reportTime, '07:30',
+      'the response must echo the stored time so the dashboard can verify the write');
+    assert.equal(persisted.droppedHolidayOverrides, undefined,
+      'the dropped-override count must never be written to the profile');
+
+    // A second save that only changes the report time must also stick.
+    persisted = undefined;
+    const second = await send({ reportTime: '21:15' });
+    assert.equal(second.statusCode, 200, JSON.stringify(second.body));
+    assert.equal(persisted.reportTime, '21:15',
+      'a report time only edit must not be dropped');
+
+    // An invalid time must be refused with a message naming the field.
+    const invalid = await send({ reportTime: '25:00' });
+    assert.equal(invalid.statusCode, 400);
+  } finally {
+    DashboardUser.findById = originalUserFindById;
+    Doctor.findOne = originalDoctorFindOne;
+    Doctor.findOneAndUpdate = originalFindOneAndUpdate;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+test('an unconfigured report is a warning, not a clinic error', async () => {
+  const Doctor = mongoose.models.Doctor;
+  const Appointment = mongoose.models.Appointment;
+  const DailyReportRun = mongoose.models.DailyReportRun;
+  const ServiceLog = mongoose.models.ServiceLog;
+  const originals = {
+    doctorFindOne: Doctor.findOne,
+    doctorExists: Doctor.exists,
+    appointmentFind: Appointment.find,
+    reportFindOneAndUpdate: DailyReportRun.findOneAndUpdate,
+    reportCreate: DailyReportRun.create,
+    reportUpdateOne: DailyReportRun.updateOne,
+    serviceLogCreate: ServiceLog.create
+  };
+  const written = [];
+  Doctor.findOne = () => ({ lean: async () => ({ doctorId: 'warn-clinic', clinicName: 'Warn Clinic', email: 'w@example.test', isActive: true }) });
+  Doctor.exists = async () => true;
+  Appointment.find = () => ({ sort() { return this; }, lean: async () => [] });
+  DailyReportRun.findOneAndUpdate = async () => null;
+  DailyReportRun.create = async () => ({});
+  DailyReportRun.updateOne = async () => ({ modifiedCount: 1 });
+  ServiceLog.create = async (doc) => { written.push(doc); return doc; };
+
+  try {
+    // SMTP was never configured, so this is a configuration gap rather than a fault.
+    await dispatchDoctorDailyReport({ doctorId: 'warn-clinic' }, {
+      transportContext: { transport: null, reason: 'missing SMTP settings: SMTP_HOST, SMTP_USER' }
+    });
+    assert.equal(written.length, 1);
+    assert.equal(written[0].level, 'warn',
+      'an unconfigured report must not be recorded as an error against the clinic');
+    assert.equal(written[0].code, 'REPORT_NOT_CONFIGURED');
+
+    // A genuine delivery failure stays an error.
+    written.length = 0;
+    await dispatchDoctorDailyReport({ doctorId: 'warn-clinic' }, {
+      transportContext: {
+        transport: { async sendMail() { throw Object.assign(new Error('mailbox unavailable'), { code: 'ECONNREFUSED' }); } },
+        reason: null
+      }
+    });
+    assert.equal(written.length, 1);
+    assert.equal(written[0].level, 'error', 'a real delivery failure must remain an error');
+    assert.equal(written[0].code, 'ECONNREFUSED');
+  } finally {
+    Doctor.findOne = originals.doctorFindOne;
+    Doctor.exists = originals.doctorExists;
+    Appointment.find = originals.appointmentFind;
+    DailyReportRun.findOneAndUpdate = originals.reportFindOneAndUpdate;
+    DailyReportRun.create = originals.reportCreate;
+    DailyReportRun.updateOne = originals.reportUpdateOne;
+    ServiceLog.create = originals.serviceLogCreate;
+  }
+});

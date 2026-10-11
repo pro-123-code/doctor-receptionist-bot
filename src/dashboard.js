@@ -1046,6 +1046,9 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         offDays: updatedDoctor.offDays,
         religiousHolidayOpenDays: updatedDoctor.religiousHolidayOpenDays || [],
         ...resolveClinicTiming(updatedDoctor),
+        // Echo the stored report time so the dashboard can verify the write, the
+        // same way the doctor save path does.
+        reportTime: normalizeReportTime(updatedDoctor.reportTime),
         religion: updatedDoctor.religion,
         setupComplete: updatedDoctor.setupComplete,
         welcomeMessage: updatedDoctor.welcomeMessage

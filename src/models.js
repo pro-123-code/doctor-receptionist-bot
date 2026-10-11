@@ -311,9 +311,9 @@ async function connectDatabase(uri, clinicId, doctorId = clinicId) {
   console.log('MongoDB connection ready');
 }
 
-function recordServiceLog(event, code, doctorId = process.env.DOCTOR_ID || process.env.CLINIC_ID) {
+function recordServiceLog(event, code, doctorId = process.env.DOCTOR_ID || process.env.CLINIC_ID, level = 'error') {
   const clinicId = doctorId;
-  ServiceLog.create({ doctorId, clinicId, level: 'error', event, code })
+  ServiceLog.create({ doctorId, clinicId, level, event, code })
     .catch(() => console.error('Operational log persistence failed'));
 }
 

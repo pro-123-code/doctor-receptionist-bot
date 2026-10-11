@@ -1801,7 +1801,9 @@ function readFacilityPricing() {
         // The server echoes the stored report time back, so a value that was
         // silently dropped is caught here instead of reverting to the default
         // the next time the form is opened.
-        const savedReportTime = result.reportTime ?? result.doctor?.reportTime;
+        // The doctor save returns reportTime at the top level and the superadmin save
+        // nests it under doctor, so read both.
+        const savedReportTime = result.doctor?.reportTime ?? result.reportTime;
         if (payload.reportTime && savedReportTime !== payload.reportTime) {
           showError(
             `The daily report time was not saved. The server stored "${savedReportTime || 'the default'}". `

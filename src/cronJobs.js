@@ -5,12 +5,26 @@ const { generateAppointmentsWorkbook } = require('./excelGenerator');
 const { getLocalDateParts } = require('./dateParser');
 const { isReportCatchUpDue, reportCatchUpMinutes } = require('./clinicTiming');
 
+// A report that could not be sent because SMTP was never configured is a
+// configuration gap the readiness panel already reports, not an operational
+// failure. Recording it as an error made every unconfigured clinic look broken
+// in the logs and in the analytics error counts, so it is logged as a warning.
+const configurationFailure = /missing SMTP settings|not configured|SMTP_PORT/i;
+
 function reportError(error, doctorId, reason) {
   const code = /^[A-Za-z0-9_-]{1,64}$/.test(String(error?.code || ''))
     ? String(error.code)
     : undefined;
-  console.error(`Daily report failed (${error?.name || 'Error'})${code ? ` [${code}]` : ''}${reason ? `: ${reason}` : ''}`);
-  recordServiceLog('Daily report', code, doctorId);
+  const detail = reason ? `${code ? ` [${code}]` : ''}: ${reason}` : (code ? ` [${code}]` : '');
+  const isConfiguration = configurationFailure.test(String(reason || ''))
+    || configurationFailure.test(String(error?.message || ''));
+  if (isConfiguration) {
+    console.warn(`Daily report not sent (${error?.name || 'Error'})${detail}`);
+    recordServiceLog('Daily report', code || 'REPORT_NOT_CONFIGURED', doctorId, 'warn');
+    return;
+  }
+  console.error(`Daily report failed (${error?.name || 'Error'})${detail}`);
+  recordServiceLog('Daily report', code, doctorId, 'error');
 }
 
 // Builds the mail transporter once per process. Returns null when SMTP is not
