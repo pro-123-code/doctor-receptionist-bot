@@ -3190,3 +3190,113 @@ test('the email diagnostic surfaces an authentication failure with a usable reme
     nodemailer.createTransport = originalCreateTransport;
   }
 });
+test('a doctor clinic setup save persists the daily report time', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'report-time-save-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const Doctor = mongoose.models.Doctor;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const originalUserFindById = DashboardUser.findById;
+  const originalDoctorFindOne = Doctor.findOne;
+  const originalFindOneAndUpdate = Doctor.findOneAndUpdate;
+
+  const doctor = {
+    doctorId: 'clinic-time', doctorName: 'Dr. Time', clinicName: 'Time Clinic',
+    email: 'time@example.test', religion: 'Muslim', basicCheckupFee: 500,
+    facilityPricing: [{ category: 'facility', name: 'Consultation', price: 500 }],
+    consultationDetails: 'Consultation charges Rs. 1500', workingDays: [1, 2, 3, 4, 5],
+    offDays: [], welcomeMessage: 'Welcome', religiousHolidayOpenDays: [],
+    officeStartHour: 9, officeEndHour: 17, appointmentDurationMinutes: 30,
+    appointmentLookaheadDays: 14, reportTime: '00:00', isActive: true
+  };
+  let persisted;
+
+  DashboardUser.findById = () => ({ lean: async () => ({ _id: 'd1', role: 'DOCTOR', doctorId: doctor.doctorId, isActive: true }) });
+  Doctor.findOne = () => ({ lean: async () => ({ ...doctor }) });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    persisted = update.$set;
+    const merged = { ...doctor, ...update.$set };
+    return { lean: async () => merged };
+  };
+
+  const base = {
+    doctorName: doctor.doctorName,
+    clinicName: doctor.clinicName,
+    religion: doctor.religion,
+    basicCheckupFee: doctor.basicCheckupFee,
+    facilityPricing: doctor.facilityPricing,
+    consultationDetails: doctor.consultationDetails,
+    workingDays: doctor.workingDays,
+    offDays: doctor.offDays,
+    religiousHolidayOpenDays: doctor.religiousHolidayOpenDays,
+    welcomeMessage: doctor.welcomeMessage,
+    officeStartHour: doctor.officeStartHour,
+    officeEndHour: doctor.officeEndHour,
+    appointmentDurationMinutes: doctor.appointmentDurationMinutes,
+    appointmentLookaheadDays: doctor.appointmentLookaheadDays,
+    reportTime: '07:30'
+  };
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get: (p, ...h) => routes.set(`GET ${p}`, h),
+      post: (p, ...h) => routes.set(`POST ${p}`, h),
+      put: (p, ...h) => routes.set(`PUT ${p}`, h),
+      patch: (p, ...h) => routes.set(`PATCH ${p}`, h),
+      delete: (p, ...h) => routes.set(`DELETE ${p}`, h)
+    };
+    mountDashboard(app, mongoose.models.Appointment, 'Asia/Karachi', doctor.doctorId, {
+      getWhatsAppSessionInfo: () => ({ authDirectory: '/tmp/doctorbot-time-test', persistent: true })
+    });
+    const token = createSessionToken(
+      { _id: 'd1', role: 'DOCTOR', doctorId: doctor.doctorId, isActive: true }, secret, Date.now() + 60_000
+    );
+    const response = {
+      locals: { doctor }, statusCode: 200,
+      status(c) { this.statusCode = c; return this; },
+      json(b) { this.body = b; }
+    };
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` }, query: {}, params: {}, body: base
+    };
+    const handlers = routes.get('PUT /api/dashboard/settings');
+    for (let i = 0; i < handlers.length; i += 1) {
+      const last = i === handlers.length - 1;
+      await handlers[i](request, response, () => {});
+      if (last || response.statusCode >= 400) break;
+    }
+
+    assert.equal(response.statusCode, 200, response.body && response.body.error);
+    assert.equal(persisted.reportTime, '07:30',
+      'the report time must reach the database write, not just the response');
+    assert.equal(response.body.reportTime, '07:30',
+      'the response must echo the stored time so the UI can verify the save');
+
+    // An invalid time must be refused with a message about the report time.
+    const invalidResponse = {
+      locals: { doctor }, statusCode: 200,
+      status(c) { this.statusCode = c; return this; },
+      json(b) { this.body = b; }
+    };
+    const invalidRequest = {
+      headers: { cookie: `doctorbot_dashboard=${token}` }, query: {}, params: {},
+      body: { ...base, reportTime: '24:00' }
+    };
+    const invalidHandlers = routes.get('PUT /api/dashboard/settings');
+    for (let i = 0; i < invalidHandlers.length; i += 1) {
+      const last = i === invalidHandlers.length - 1;
+      await invalidHandlers[i](invalidRequest, invalidResponse, () => {});
+      if (last || invalidResponse.statusCode >= 400) break;
+    }
+    assert.equal(invalidResponse.statusCode, 400);
+    assert.match(invalidResponse.body.error, /report time/i);
+  } finally {
+    DashboardUser.findById = originalUserFindById;
+    Doctor.findOne = originalDoctorFindOne;
+    Doctor.findOneAndUpdate = originalFindOneAndUpdate;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});

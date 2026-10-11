@@ -256,6 +256,10 @@ function normalizeDoctorSettings(body = {}) {
     basicCheckupFee, facilityPricing, welcomeMessage
   } = body;
   const timingPatch = normalizeClinicTimingInput(body);
+  // The daily report time is part of the clinic setup the doctor edits, so it has
+  // to be read here. It was previously validated by the admin path only, so a
+  // doctor's change was accepted and then dropped before the database write.
+  const reportTime = normalizeReportTime(body.reportTime);
   const normalizedWorkingDays = normalizeWorkingDays(workingDays);
   const normalizedOffDays = normalizeOffDays(offDays);
   const requestedHolidayOpenDays = normalizeOffDays(body.religiousHolidayOpenDays || []);
@@ -275,6 +279,7 @@ function normalizeDoctorSettings(body = {}) {
   if (!normalizedOffDays) return { error: 'One or more clinic off-days is not a valid date.' };
   if (!requestedHolidayOpenDays) return { error: 'One or more religious holiday dates is not valid.' };
   if (!timingPatch) return { error: 'Check the clinic timings: closing time must be later than opening time, and bookings 1 to 30 days ahead.' };
+  if (!reportTime) return { error: 'Set the daily report time to a valid 24-hour time between 00:00 and 23:59.' };
   if (!isValidRupeeAmount(basicCheckupFee)) return { error: 'Enter the basic checkup fee as a rupee amount of 0 or more.' };
   if (typeof consultationDetails !== 'string' || !consultationDetails.trim() || consultationDetails.length > 2000) {
     return { error: 'Enter consultation details of 2000 characters or fewer.' };
@@ -318,6 +323,7 @@ function normalizeDoctorSettings(body = {}) {
       religion,
       welcomeMessage: welcomeMessage.trim(),
       ...timingPatch,
+      reportTime,
       setupComplete: true,
       updatedAt: new Date()
     }
@@ -423,7 +429,8 @@ function normalizeAdminDoctorPatch(body = {}, existingDoctor = {}) {
     officeStartHour: merged.officeStartHour,
     officeEndHour: merged.officeEndHour,
     appointmentDurationMinutes: merged.appointmentDurationMinutes,
-    appointmentLookaheadDays: merged.appointmentLookaheadDays
+    appointmentLookaheadDays: merged.appointmentLookaheadDays,
+    reportTime: merged.reportTime
   }).error === null);
   return patch;
 }

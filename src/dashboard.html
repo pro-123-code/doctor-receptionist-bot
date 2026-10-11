@@ -1798,6 +1798,17 @@ function readFacilityPricing() {
           throw new Error(result.error || 'Could not save clinic setup.');
         }
         notice.hidden = true;
+        // The server echoes the stored report time back, so a value that was
+        // silently dropped is caught here instead of reverting to the default
+        // the next time the form is opened.
+        const savedReportTime = result.reportTime ?? result.doctor?.reportTime;
+        if (payload.reportTime && savedReportTime !== payload.reportTime) {
+          showError(
+            `The daily report time was not saved. The server stored "${savedReportTime || 'the default'}". `
+            + 'Reload the page and try again.'
+          );
+          return;
+        }
         if (result.droppedHolidayOverrides > 0) {
           showBanner(
             `Saved. ${result.droppedHolidayOverrides} holiday override${result.droppedHolidayOverrides === 1 ? ' was' : 's were'} removed because ${result.droppedHolidayOverrides === 1 ? 'it is' : 'they are'} not a holiday for the selected religion.`,

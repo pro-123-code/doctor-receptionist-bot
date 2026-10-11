@@ -140,6 +140,8 @@ function createHarness() {
     // The script probes the session on load; an unauthenticated probe must simply
     // return so the test drives showDashboard itself.
     '/api/dashboard/session': { authenticated: false },
+    // Mutated to the stored report time when the form saves, mirroring a server
+    // that echoes back what it wrote.
     '/api/dashboard/settings': {
       doctorName: 'Dr. Haider', clinicName: 'Apna city clinic', email: 'haider@example.test',
       religion: 'Muslim', basicCheckupFee: 500, consultationDetails: 'Consultation charges Rs. 1500',
@@ -211,16 +213,28 @@ function createHarness() {
       logs: [{ id: 'l1', doctorId: 'clinic-one', doctorName: 'Dr. Haider', level: 'info', event: 'Startup', code: null, createdAt: '2026-10-07T00:00:00.000Z' }]
     }
   };
+  let parsedReportTime;
   const fetchStub = async (url, options = {}) => {
     const path_ = String(url).split('?')[0];
     requested.push(path_);
+    parsedReportTime = undefined;
     if (options.body) {
-      try { bodies.push({ path: path_, method: options.method, payload: JSON.parse(options.body) }); }
-      catch { bodies.push({ path: path_, method: options.method, payload: null }); }
+      try {
+        const parsed = JSON.parse(options.body);
+        bodies.push({ path: path_, method: options.method, payload: parsed });
+        if (parsed.reportTime) parsedReportTime = parsed.reportTime;
+      } catch {
+        bodies.push({ path: path_, method: options.method, payload: null });
+      }
     }
     if (responses[path_] === undefined) {
       errors.push(`unexpected request ${path_}`);
       return { ok: false, status: 404, json: async () => ({ error: 'not stubbed' }) };
+    }
+    // A save returns the record as stored, so the dashboard's verification of the
+    // report time reads back what was actually written.
+    if (options.method === 'PUT' && parsedReportTime) {
+      responses[path_] = { ...responses[path_], reportTime: parsedReportTime };
     }
     return { ok: true, status: 200, json: async () => responses[path_] };
   };
@@ -350,6 +364,13 @@ async function main() {
       }
       if (save.payload?.reportTime !== '07:30') {
         failures.push(`save lost the daily report time -> ${save.payload?.reportTime}`);
+      }
+      // The form must send the report time and the server must echo it back, so a
+      // value dropped before the database write cannot pass silently.
+      const savedSettings = submit.responses['/api/dashboard/settings'];
+      if (savedSettings.reportTime !== save.payload?.reportTime) {
+        failures.push(`the saved report time does not match what was sent -> `
+          + `${savedSettings.reportTime} vs ${save.payload?.reportTime}`);
       }
       // A save that reached the server must not also leave an error banner. The
       // handler catches its own errors, so a broken success path shows up here as
