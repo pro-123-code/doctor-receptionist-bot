@@ -56,8 +56,10 @@ const appointmentSchema = new Schema({
       message: 'Appointment end must be after its start'
     }
   },
-  status: { type: String, enum: ['pending', 'booked'], required: true },
+  status: { type: String, enum: ['pending', 'booked', 'cancelled'], required: true },
   calendarEventId: { type: String },
+  cancelledAt: { type: Date },
+  cancelledBy: { type: String },
   expiresAt: { type: Date, expires: 0 }
 }, { timestamps: true, versionKey: false });
 appointmentSchema.index({ doctorId: 1, slotKey: 1 }, { unique: true });
@@ -175,6 +177,22 @@ const dashboardUserSchema = new Schema({
 dashboardUserSchema.index({ doctorId: 1, role: 1 });
 
 const Conversation = mongoose.models.Conversation || mongoose.model('Conversation', conversationSchema);
+
+// Records what a superadmin changed, so account management is traceable after the
+// fact. Written for destructive and permission changing actions.
+const auditLogSchema = new Schema({
+  actorId: { type: String, required: true },
+  actorEmail: { type: String },
+  action: { type: String, required: true, index: true },
+  targetDoctorId: { type: String, default: null, index: true },
+  targetLabel: { type: String, default: '' },
+  detail: { type: String, default: '' },
+  ipAddress: { type: String }
+}, { timestamps: { createdAt: true, updatedAt: false } });
+
+// Every action is recorded, and the record is never edited or removed.
+auditLogSchema.index({ createdAt: -1 });
+const AuditLog = mongoose.models.AuditLog || mongoose.model('AuditLog', auditLogSchema);
 const Appointment = mongoose.models.Appointment || mongoose.model('Appointment', appointmentSchema);
 const ServiceLog = mongoose.models.ServiceLog || mongoose.model('ServiceLog', serviceLogSchema);
 const DashboardLoginAttempt = mongoose.models.DashboardLoginAttempt || mongoose.model('DashboardLoginAttempt', dashboardLoginAttemptSchema);
@@ -427,6 +445,7 @@ async function deleteConversation(senderJid, doctorId = process.env.DOCTOR_ID ||
 
 module.exports = {
   Appointment,
+  AuditLog,
   Conversation,
   DailyReportRun,
   InboundMessage,

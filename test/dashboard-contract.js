@@ -82,7 +82,8 @@ for (const endpoint of ['/api/dashboard/login', '/api/dashboard/logout', '/api/d
   '/api/dashboard/calendar/disconnect', '/api/admin/doctors',
   '/api/admin/overview', '/api/admin/appointments', '/api/admin/analytics', '/api/admin/system',
   '/api/admin/service-logs', '/api/admin/diagnostics/voice', '/api/admin/diagnostics/email',
-  '/api/admin/diagnostics/gemini', '/api/admin/doctors/${encodeURIComponent']) {
+  '/api/admin/diagnostics/gemini', '/api/admin/audit-log',
+  '/api/dashboard/appointments.csv', '/api/admin/doctors/${encodeURIComponent']) {
   if (!inline.includes(endpoint)) {
     console.error(`dashboard: script no longer calls ${endpoint}`);
     process.exit(1);
@@ -100,12 +101,14 @@ for (const match of serverSource.matchAll(/app\.(get|post|put|patch|delete)\('(\
   }
 }
 const adminRoutes = [...serverSource.matchAll(/app\.(get|post|put|patch|delete)\('\/api\/admin\//g)].length;
-if (adminRoutes < 14) {
+if (adminRoutes < 15) {
   console.error(`server: expected a full control panel, found only ${adminRoutes} admin routes`);
   process.exit(1);
 }
 for (const id of ['clinic-report-time', 'admin-voice-test', 'admin-voice-result', 'admin-remediation',
-  'admin-email-test', 'admin-email-send', 'admin-email-result', 'admin-gemini-test', 'admin-gemini-result']) {
+  'admin-email-test', 'admin-email-send', 'admin-email-result', 'admin-gemini-test', 'admin-gemini-result',
+  'admin-audit', 'admin-audit-refresh', 'admin-audit-empty',
+  'report-date-to', 'appointment-search', 'appointment-range', 'export-appointments']) {
   if (!requiredIds.includes(id) && !html.includes(`id="${id}"`)) {
     console.error(`dashboard: required element ${id} is missing`);
     process.exit(1);

@@ -4,11 +4,12 @@ const path = require('node:path');
 const mongoose = require('mongoose');
 const { google } = require('googleapis');
 const { getLocalDateParts, getLocalDayBounds } = require('./dateParser');
-const { Conversation, DashboardUser, DailyReportRun, Doctor, InboundMessage, ServiceLog, consumeDashboardLoginAttempt } = require('./models');
+const { Conversation, DashboardUser, DailyReportRun, Doctor, AuditLog, InboundMessage, ServiceLog, consumeDashboardLoginAttempt } = require('./models');
 const { hashPassword, verifyPassword } = require('./passwords');
 const { encryptJson, hasValidEncryptionKey } = require('./secretBox');
 const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
 const { getReligiousHolidays } = require('./clinicSchedule');
+const { isClinicOpenOnDate } = require('./clinicSchedule');
 const { isValidRupeeAmount, normalizeFacilityPricing } = require('./facilityPricing');
 const { diagnoseEmailPipeline } = require('./emailDiagnostics');
 const { diagnoseGemini } = require('./gemini');
@@ -249,6 +250,63 @@ function getGoogleCalendarOAuthStatus(request, environment = process.env) {
     redirectUri,
     error: error || null
   };
+}
+
+// Turns the requested range into absolute bounds. A range spanning several days is
+// what makes a booking on another date visible without hunting for it.
+const MAX_APPOINTMENT_WINDOW_DAYS = 92;
+
+function resolveAppointmentWindow(query = {}, dateKey, todayKey, timeZone) {
+  const partsOf = (key) => {
+    const [year, month, day] = key.split('-').map(Number);
+    return { year, month, day };
+  };
+  let fromKey = isValidDateKey(query.from) ? query.from : dateKey;
+  let toKey = isValidDateKey(query.to) ? query.to : fromKey;
+  if (toKey < fromKey) toKey = fromKey;
+
+  const { start } = getLocalDayBounds(partsOf(fromKey), timeZone);
+  const lastDay = new Date(start.getTime() + (MAX_APPOINTMENT_WINDOW_DAYS - 1) * 24 * 60 * 60 * 1000);
+  const lastParts = getLocalDateParts(lastDay, timeZone);
+  const clampedTo = `${lastParts.year}-${String(lastParts.month).padStart(2, '0')}-${String(lastParts.day).padStart(2, '0')}`;
+  if (toKey > clampedTo) toKey = clampedTo;
+
+  const { end } = getLocalDayBounds(partsOf(toKey), timeZone);
+  return {
+    fromKey,
+    toKey,
+    start,
+    end,
+    // Day separators only make sense when more than one day is in view.
+    grouped: toKey !== fromKey
+  };
+}
+
+// Quotes a value for CSV so a comma, quote or newline in patient text cannot break
+// the column layout, and neutralises a leading formula character.
+function toCsvCell(value) {
+  const text = value === null || value === undefined ? '' : String(value);
+  const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+  return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
+
+// Records a superadmin action. Never throws: failing to audit must not fail the
+// operation the operator asked for.
+async function recordAuditAction(request, response, entry) {
+  try {
+    const actor = response.locals.dashboardUser || {};
+    await AuditLog.create({
+      actorId: String(actor._id || 'unknown'),
+      actorEmail: actor.email || null,
+      action: entry.action,
+      targetDoctorId: entry.targetDoctorId || null,
+      targetLabel: entry.targetLabel || '',
+      detail: entry.detail || '',
+      ipAddress: request.ip || request.headers?.['x-forwarded-for'] || null
+    });
+  } catch (error) {
+    console.error(`Audit log write failed (${error?.name || 'Error'})`);
+  }
 }
 
 function normalizeDoctorSettings(body = {}) {
@@ -667,21 +725,36 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     const user = response.locals.dashboardUser;
     if (user.role !== 'DOCTOR') return response.status(403).json({ error: 'Doctor access required' });
     const today = getLocalDateParts(new Date(), timeZone);
-    const dateKey = request.query.date || `${today.year}-${String(today.month).padStart(2, '0')}-${String(today.day).padStart(2, '0')}`;
+    const todayKey = `${today.year}-${String(today.month).padStart(2, '0')}-${String(today.day).padStart(2, '0')}`;
+    // A single day was the only option, so a booking on another date was invisible
+    // unless the date was switched by hand. A range is now accepted and a search
+    // term can narrow it to one patient.
+    const dateKey = request.query.date || todayKey;
     if (!isValidDateKey(dateKey)) return response.status(400).json({ error: 'date must use YYYY-MM-DD format' });
+    const window = resolveAppointmentWindow(request.query, dateKey, todayKey, timeZone);
+
+    const search = typeof request.query.q === 'string' ? request.query.q.trim().slice(0, 60) : '';
+    const filter = {
+      doctorId: user.doctorId,
+      status: 'booked',
+      slotStart: { $gte: window.start > new Date() ? window.start : new Date(), $lt: window.end }
+    };
+    if (search) {
+      const pattern = new RegExp(escapeRegExp(search), 'i');
+      filter.$or = [{ 'details.name': pattern }, { 'details.contactNumber': pattern }];
+    }
 
     try {
-      const [year, month, day] = dateKey.split('-').map(Number);
-      const { start, end } = getLocalDayBounds({ year, month, day }, timeZone);
-      const appointments = await Appointment.find({
-        doctorId: user.doctorId,
-        status: 'booked',
-        slotStart: { $gte: start > new Date() ? start : new Date(), $lt: end },
-      }).sort({ slotStart: 1 }).lean();
+      const appointments = await Appointment.find(filter).sort({ slotStart: 1 }).limit(500).lean();
       response.json({
         date: dateKey,
+        from: window.fromKey,
+        to: window.toKey,
+        grouped: window.grouped,
+        search,
         timeZone,
-        appointments: appointments.map(({ details, slotStart, slotEnd }) => ({
+        appointments: appointments.map(({ _id, details, slotStart, slotEnd }) => ({
+          id: String(_id),
           patientName: details.name,
           whatsAppNumber: details.contactNumber,
           symptoms: details.majorSymptoms,
@@ -692,6 +765,173 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     } catch (error) {
       console.error(`Dashboard appointments failed (${error?.name || 'Error'})`);
       response.status(503).json({ error: 'Appointments are temporarily unavailable' });
+    }
+  });
+
+  // Exports exactly what the list is showing, so the spreadsheet matches the view.
+  app.get('/api/dashboard/appointments.csv', requireDashboardAuth, async (request, response) => {
+    const user = response.locals.dashboardUser;
+    if (user.role !== 'DOCTOR') return response.status(403).json({ error: 'Doctor access required' });
+    const today = getLocalDateParts(new Date(), timeZone);
+    const todayKey = `${today.year}-${String(today.month).padStart(2, '0')}-${String(today.day).padStart(2, '0')}`;
+    const window = resolveAppointmentWindow(request.query, request.query.date || todayKey, todayKey, timeZone);
+    const search = typeof request.query.q === 'string' ? request.query.q.trim().slice(0, 60) : '';
+    const filter = {
+      doctorId: user.doctorId,
+      status: 'booked',
+      slotStart: { $gte: window.start > new Date() ? window.start : new Date(), $lt: window.end }
+    };
+    if (search) {
+      const pattern = new RegExp(escapeRegExp(search), 'i');
+      filter.$or = [{ 'details.name': pattern }, { 'details.contactNumber': pattern }];
+    }
+    try {
+      const rows = await Appointment.find(filter).sort({ slotStart: 1 }).limit(5000).lean();
+      const clinic = response.locals.doctor || {};
+      const lines = [
+        [`Appointments - ${clinic.clinicName || 'Clinic'}`],
+        [`Window`, `${window.fromKey} to ${window.toKey}`, search ? `Search: ${search}` : ''].filter(Boolean).join(', '),
+        [],
+        ['Patient', 'WhatsApp', 'Symptoms', 'Start', 'End'].map(toCsvCell).join(','),
+        ...rows.map((row) => [
+          row.details.name, row.details.contactNumber, row.details.majorSymptoms,
+          new Date(row.slotStart).toISOString(), new Date(row.slotEnd).toISOString()
+        ].map(toCsvCell).join(','))
+      ];
+      response.set('Content-Type', 'text/csv; charset=utf-8');
+      response.set('Content-Disposition', `attachment; filename="appointments-${window.fromKey}-to-${window.toKey}.csv"`);
+      response.send(`\uFEFF${lines.join('\r\n')}`);
+    } catch (error) {
+      console.error(`Appointment export failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Appointments could not be exported' });
+    }
+  });
+
+  // Cancels a booking and removes the matching calendar event so the two never
+  // disagree. Marked rather than deleted so the slot history is not lost.
+  app.post('/api/dashboard/appointments/:appointmentId/cancel', requireDashboardAuth, async (request, response) => {
+    const user = response.locals.dashboardUser;
+    if (user.role !== 'DOCTOR') return response.status(403).json({ error: 'Doctor access required' });
+    if (!mongoose.isValidObjectId(request.params.appointmentId)) {
+      return response.status(400).json({ error: 'That appointment id is not valid' });
+    }
+    try {
+      const appointment = await Appointment.findOne({
+        _id: request.params.appointmentId,
+        doctorId: user.doctorId,
+        status: 'booked'
+      });
+      if (!appointment) return response.status(404).json({ error: 'Appointment not found or already cancelled' });
+
+      const released = await Appointment.findOneAndUpdate(
+        { _id: appointment._id, status: 'booked' },
+        { $set: { status: 'cancelled', cancelledAt: new Date(), cancelledBy: user.doctorId } },
+        { new: true }
+      );
+      if (!released) return response.status(409).json({ error: 'That appointment was already cancelled' });
+
+      let calendarRemoved = false;
+      if (released.calendarEventId) {
+        try {
+          const client = await createCalendarApiClient(response.locals.doctor);
+          if (client) {
+            await client.events.delete({
+              calendarId: released.calendarEventId,
+              eventId: released.calendarEventId
+            });
+            calendarRemoved = true;
+          }
+        } catch (error) {
+          // The booking is already released locally; a calendar failure must not
+          // undo that or leave the caller thinking nothing happened.
+          console.error(`Calendar event removal failed (${error?.name || 'Error'})`);
+        }
+      }
+
+      response.json({
+        cancelled: true,
+        appointmentId: String(released._id),
+        slotStart: released.slotStart,
+        calendarRemoved
+      });
+    } catch (error) {
+      console.error(`Appointment cancellation failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Appointment could not be cancelled' });
+    }
+  });
+
+  // Moves a booking to a new slot in one step, keeping a single appointment
+  // record so the patient is not counted twice.
+  app.post('/api/dashboard/appointments/:appointmentId/reschedule', requireDashboardAuth, async (request, response) => {
+    const user = response.locals.dashboardUser;
+    if (user.role !== 'DOCTOR') return response.status(403).json({ error: 'Doctor access required' });
+    if (!mongoose.isValidObjectId(request.params.appointmentId)) {
+      return response.status(400).json({ error: 'That appointment id is not valid' });
+    }
+    const requestedSlotStart = new Date(request.body?.slotStart || '');
+    if (Number.isNaN(requestedSlotStart.getTime()) || requestedSlotStart.getTime() <= Date.now()) {
+      return response.status(400).json({ error: 'Choose a new slot start time in the future' });
+    }
+    try {
+      const doctor = response.locals.doctor;
+      const timing = resolveClinicTiming(doctor);
+      const slotStartParts = getLocalDateParts(requestedSlotStart, timeZone);
+      const slotKey = `${slotStartParts.year}-${String(slotStartParts.month).padStart(2, '0')}-${String(slotStartParts.day).padStart(2, '0')}T`
+        + `${String(slotStartParts.hour).padStart(2, '0')}:${String(slotStartParts.minute).padStart(2, '0')}`;
+      if (!isClinicOpenOnDate(slotKey.slice(0, 10), doctor)) {
+        return response.status(400).json({ error: 'The clinic is closed on that date' });
+      }
+      const localHour = slotStartParts.hour;
+      if (localHour < timing.officeStartHour || localHour >= timing.officeEndHour) {
+        return response.status(400).json({ error: 'That slot is outside the clinic opening hours' });
+      }
+
+      const slotEnd = new Date(requestedSlotStart.getTime() + timing.appointmentDurationMinutes * 60 * 1000);
+      const conflicting = await Appointment.exists({
+        doctorId: user.doctorId,
+        status: 'booked',
+        slotStart: requestedSlotStart,
+        _id: { $ne: request.params.appointmentId }
+      });
+      if (conflicting) return response.status(409).json({ error: 'That slot is already booked' });
+
+      const moved = await Appointment.findOneAndUpdate(
+        { _id: request.params.appointmentId, doctorId: user.doctorId, status: 'booked' },
+        { $set: { slotStart: requestedSlotStart, slotEnd, slotKey } },
+        { new: true, runValidators: true }
+      );
+      if (!moved) return response.status(404).json({ error: 'Appointment not found or already cancelled' });
+
+      let calendarUpdated = false;
+      if (moved.calendarEventId) {
+        try {
+          const client = await createCalendarApiClient(doctor);
+          if (client) {
+            await client.events.update({
+              calendarId: moved.calendarEventId,
+              eventId: moved.calendarEventId,
+              requestBody: {
+                start: { dateTime: requestedSlotStart.toISOString() },
+                end: { dateTime: slotEnd.toISOString() }
+              }
+            });
+            calendarUpdated = true;
+          }
+        } catch (error) {
+          console.error(`Calendar event reschedule failed (${error?.name || 'Error'})`);
+        }
+      }
+
+      response.json({
+        rescheduled: true,
+        appointmentId: String(moved._id),
+        slotStart: moved.slotStart,
+        slotEnd: moved.slotEnd,
+        calendarUpdated
+      });
+    } catch (error) {
+      console.error(`Appointment reschedule failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Appointment could not be rescheduled' });
     }
   });
 
@@ -889,6 +1129,12 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         }
       }
       const oauthStatus = getGoogleCalendarOAuthStatus(request);
+      await recordAuditAction(request, response, {
+        action: 'doctor.update',
+        targetDoctorId: updatedDoctor.doctorId,
+        targetLabel: updatedDoctor.clinicName || '',
+        detail: 'Clinic setup saved from the superadmin dashboard'
+      });
       response.json({
         saved: true,
         droppedHolidayOverrides: normalized.droppedHolidayOverrides,
@@ -1094,6 +1340,12 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         doctorId,
         isActive: true
       });
+      await recordAuditAction(request, response, {
+        action: 'doctor.create',
+        targetDoctorId: doctor.doctorId,
+        targetLabel: doctor.clinicName || '',
+        detail: `Account created for ${normalizedEmail}`
+      });
       response.status(201).json({
         doctor: {
           doctorId: doctor.doctorId,
@@ -1123,6 +1375,12 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       ).lean();
       if (!doctor) return response.status(404).json({ error: 'Doctor not found' });
       await DashboardUser.updateMany({ doctorId: doctor.doctorId, role: 'DOCTOR' }, { $set: { isActive } });
+      await recordAuditAction(request, response, {
+        action: isActive ? 'doctor.activate' : 'doctor.deactivate',
+        targetDoctorId: doctor.doctorId,
+        targetLabel: doctor.clinicName || '',
+        detail: isActive ? 'Access restored' : 'Access suspended'
+      });
       response.json({ doctorId: doctor.doctorId, isActive: doctor.isActive });
     } catch (error) {
       console.error(`Doctor account update failed (${error?.name || 'Error'})`);
@@ -1411,6 +1669,30 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
   // Permanently removes a clinic and everything owned by it. Destructive, so the
   // caller must echo the doctor id back as confirmation, which stops a stray click
   // or a replayed request from destroying data.
+  app.get('/api/admin/audit-log', requireDashboardAuth, requireSuperadmin, async (request, response) => {
+    try {
+      const limit = clampInteger(request.query.limit, { min: 1, max: 200, fallback: 50 });
+      const filter = {};
+      if (isValidDoctorSlug(request.query.doctorId)) filter.targetDoctorId = request.query.doctorId;
+      const entries = await AuditLog.find(filter).sort({ createdAt: -1 }).limit(limit).lean();
+      response.json({
+        timeZone,
+        entries: entries.map((entry) => ({
+          id: String(entry._id),
+          actorEmail: entry.actorEmail || entry.actorId,
+          action: entry.action,
+          targetDoctorId: entry.targetDoctorId,
+          targetLabel: entry.targetLabel,
+          detail: entry.detail,
+          createdAt: entry.createdAt
+        }))
+      });
+    } catch (error) {
+      console.error(`Audit log read failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Audit history is temporarily unavailable' });
+    }
+  });
+
   app.delete('/api/admin/doctors/:doctorId', requireDashboardAuth, requireSuperadmin, async (request, response) => {
     const targetDoctorId = request.params.doctorId;
     try {
@@ -1454,6 +1736,13 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       }
 
       console.log(`Doctor account deleted (${targetDoctorId}) by superadmin`);
+      await recordAuditAction(request, response, {
+        action: 'doctor.delete',
+        targetDoctorId,
+        targetLabel: doctor.clinicName || '',
+        detail: `Removed ${users.deletedCount || 0} login(s), ${appointments.deletedCount || 0} appointment(s), `
+          + `${conversations.deletedCount || 0} conversation(s)`
+      });
       response.json({
         deleted: true,
         doctorId: targetDoctorId,

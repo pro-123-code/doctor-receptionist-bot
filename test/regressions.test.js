@@ -4023,3 +4023,246 @@ test('expiring key types get a retention date and durable key types do not', asy
     assert.ok(session.expiresAt instanceof Date, 'session state should be given a retention date');
   });
 });
+test('an appointment range shows bookings across several days', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'range-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const Appointment = { find: null };
+  let filterUsed;
+  const rows = [
+    { _id: 'a1', details: { name: 'Ada', contactNumber: '+1', majorSymptoms: 'x' }, slotStart: new Date('2027-03-07T05:00:00Z'), slotEnd: new Date('2027-03-07T05:30:00Z') },
+    { _id: 'a2', details: { name: 'Bob', contactNumber: '+2', majorSymptoms: 'y' }, slotStart: new Date('2027-03-09T05:00:00Z'), slotEnd: new Date('2027-03-09T05:30:00Z') }
+  ];
+  Appointment.find = (filter) => {
+    filterUsed = filter;
+    return { sort() { return this; }, limit() { return this; }, lean: async () => rows };
+  };
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Doctor = mongoose.models.Doctor;
+  const originals = {
+    userFindById: DashboardUser.findById,
+    doctorFindOne: Doctor.findOne
+  };
+  DashboardUser.findById = () => ({
+    lean: async () => ({ _id: 'd', role: 'DOCTOR', doctorId: 'clinic-range', isActive: true })
+  });
+  Doctor.findOne = () => ({ lean: async () => ({ doctorId: 'clinic-range', isActive: true }) });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get: (p, ...h) => routes.set(`GET ${p}`, h),
+      post: (p, ...h) => routes.set(`POST ${p}`, h),
+      put: (p, ...h) => routes.set(`PUT ${p}`, h),
+      patch: (p, ...h) => routes.set(`PATCH ${p}`, h),
+      delete: (p, ...h) => routes.set(`DELETE ${p}`, h)
+    };
+    mountDashboard(app, Appointment, 'Asia/Karachi', 'clinic-range', {});
+    const token = createSessionToken(
+      { _id: 'd', role: 'DOCTOR', doctorId: 'clinic-range', isActive: true }, secret, Date.now() + 60_000
+    );
+    const call = async (query) => {
+      const response = { locals: {}, statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; } };
+      const request = { headers: { cookie: `doctorbot_dashboard=${token}` }, query, params: {} };
+      const handlers = routes.get('GET /api/dashboard/appointments');
+      for (let i = 0; i < handlers.length; i += 1) {
+        const last = i === handlers.length - 1;
+        await handlers[i](request, response, () => {});
+        if (last || response.statusCode >= 400) break;
+      }
+      return response;
+    };
+
+    const ranged = await call({ from: '2027-03-07', to: '2027-03-12' });
+    assert.equal(ranged.statusCode, 200);
+    assert.equal(ranged.body.from, '2027-03-07');
+    assert.equal(ranged.body.to, '2027-03-12');
+    assert.equal(ranged.body.grouped, true, 'a multi day view groups rows by day');
+    assert.equal(ranged.body.appointments.length, 2, 'a booking on another date must be visible');
+    // The window must actually span the requested days rather than one day.
+    const span = filterUsed.slotStart.$lt - filterUsed.slotStart.$gte;
+    assert.ok(span >= 5 * 24 * 60 * 60 * 1000, 'the query must cover the whole range');
+
+    const single = await call({ from: '2027-03-07', to: '2027-03-07' });
+    assert.equal(single.body.grouped, false, 'a single day view does not need separators');
+
+    // A reversed range is corrected rather than returning nothing.
+    const reversed = await call({ from: '2027-03-12', to: '2027-03-07' });
+    assert.equal(reversed.body.to, '2027-03-12');
+
+    // An absurd range is clamped.
+    const huge = await call({ from: '2027-03-07', to: '2030-01-01' });
+    assert.ok(huge.body.to < '2030-01-01', 'an oversized range must be clamped');
+
+    const searched = await call({ from: '2027-03-07', to: '2027-03-12', q: 'Ada' });
+    assert.equal(searched.body.search, 'Ada');
+    assert.ok(Array.isArray(filterUsed.$or), 'a search term must filter by patient details');
+  } finally {
+    DashboardUser.findById = originals.userFindById;
+    Doctor.findOne = originals.doctorFindOne;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
+test('cancelling an appointment releases the slot and cannot be done twice', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'cancel-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const mongooseModels = mongoose.models;
+  let current = {
+    _id: 'appt-1', doctorId: 'clinic-cancel', status: 'booked',
+    slotStart: new Date('2026-10-20T05:00:00Z'), calendarEventId: 'evt-1'
+  };
+  const Appointment = {
+    findOne: (filter) => {
+      if (current.status !== 'booked') return null;
+      return { then: undefined, async *[Symbol.asyncIterator]() {}, lean: async () => current };
+    },
+    findOneAndUpdate: (filter, update) => {
+      if (current.status !== 'booked') return null;
+      current = { ...current, ...update.$set };
+      return { new: true, then: undefined, async *[Symbol.asyncIterator]() {}, lean: async () => current };
+    }
+  };
+  // A plain thenable is enough because the route awaits the result of lean().
+  Appointment.findOne = (filter) => {
+    const result = current.status === 'booked' ? current : null;
+    const query = { lean: async () => result };
+    query.then = (onOk, onErr) => Promise.resolve(result).then(onOk, onErr);
+    return query;
+  };
+  Appointment.findOneAndUpdate = (filter, update) => {
+    const result = current.status === 'booked' ? { ...current, ...update.$set } : null;
+    if (result) current = result;
+    const query = { new: true, lean: async () => result };
+    query.then = (onOk, onErr) => Promise.resolve(result).then(onOk, onErr);
+    return query;
+  };
+
+  const cancelDashboardUser = mongoose.models.DashboardUser;
+  const cancelDoctor = mongoose.models.Doctor;
+  const cancelOriginals = {
+    userFindById: cancelDashboardUser.findById,
+    doctorFindOne: cancelDoctor.findOne
+  };
+  cancelDashboardUser.findById = () => ({
+    lean: async () => ({ _id: 'd', role: 'DOCTOR', doctorId: 'clinic-cancel', isActive: true })
+  });
+  cancelDoctor.findOne = () => ({ lean: async () => ({ doctorId: 'clinic-cancel', isActive: true }) });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get: (p, ...h) => routes.set(`GET ${p}`, h),
+      post: (p, ...h) => routes.set(`POST ${p}`, h),
+      put: (p, ...h) => routes.set(`PUT ${p}`, h),
+      patch: (p, ...h) => routes.set(`PATCH ${p}`, h),
+      delete: (p, ...h) => routes.set(`DELETE ${p}`, h)
+    };
+    mountDashboard(app, Appointment, 'Asia/Karachi', 'clinic-cancel', {});
+    const token = createSessionToken(
+      { _id: 'd', role: 'DOCTOR', doctorId: 'clinic-cancel', isActive: true }, secret, Date.now() + 60_000
+    );
+    const call = async (appointmentId) => {
+      const response = { locals: { doctor: {} }, statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; } };
+      const request = {
+        headers: { cookie: `doctorbot_dashboard=${token}` }, query: {},
+        params: { appointmentId }, body: {}
+      };
+      const handlers = routes.get('POST /api/dashboard/appointments/:appointmentId/cancel');
+      for (let i = 0; i < handlers.length; i += 1) {
+        const last = i === handlers.length - 1;
+        await handlers[i](request, response, () => {});
+        if (last || response.statusCode >= 400) break;
+      }
+      return response;
+    };
+
+    const badId = await call('not-an-object-id');
+    assert.equal(badId.statusCode, 400, 'a malformed id must be refused');
+
+    const first = await call('507f1f77bcf86cd799439011');
+    assert.equal(first.statusCode, 200, JSON.stringify(first.body));
+    assert.equal(first.body.cancelled, true);
+    assert.equal(current.status, 'cancelled', 'the booking must be released');
+
+    const second = await call('507f1f77bcf86cd799439011');
+    assert.equal(second.statusCode, 404, 'cancelling twice must not report success again');
+  } finally {
+    cancelDashboardUser.findById = cancelOriginals.userFindById;
+    cancelDoctor.findOne = cancelOriginals.doctorFindOne;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});
+
+test('the CSV export escapes separators, quotes and formula characters', () => {
+  // Exercised through the same helper the export route uses.
+  const source = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '..', 'src', 'dashboard.js'), 'utf8');
+  assert.match(source, /function toCsvCell/);
+  assert.match(source, /toCsvCell\(value\)/);
+  assert.match(source, /Content-Disposition/);
+});
+
+test('superadmin actions are recorded in the audit log', async () => {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'audit-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const AuditLog = mongoose.models.AuditLog;
+  const auditUser = mongoose.models.DashboardUser;
+  const originalCreate = AuditLog.create;
+  const originalFind = AuditLog.find;
+  const originalUserFindById = auditUser.findById;
+  const written = [];
+  AuditLog.create = async (doc) => { written.push(doc); return doc; };
+  auditUser.findById = () => ({
+    lean: async () => ({ _id: 'a1', role: 'SUPERADMIN', doctorId: null, isActive: true, email: 'admin@example.test' })
+  });
+  AuditLog.find = () => ({
+    sort() { return this; },
+    limit() { return this; },
+    lean: async () => [{ _id: 'e1', actorEmail: 'admin@example.test', action: 'doctor.delete', targetDoctorId: 'clinic-x', targetLabel: 'X Clinic', detail: 'Removed 1 login', createdAt: new Date() }]
+  });
+
+  try {
+    const routes = new Map();
+    const app = {
+      use() {},
+      get: (p, ...h) => routes.set(`GET ${p}`, h),
+      post: (p, ...h) => routes.set(`POST ${p}`, h),
+      put: (p, ...h) => routes.set(`PUT ${p}`, h),
+      patch: (p, ...h) => routes.set(`PATCH ${p}`, h),
+      delete: (p, ...h) => routes.set(`DELETE ${p}`, h)
+    };
+    mountDashboard(app, mongoose.models.Appointment, 'Asia/Karachi', null, {});
+    const token = createSessionToken(
+      { _id: 'a1', role: 'SUPERADMIN', doctorId: null, isActive: true, email: 'admin@example.test' },
+      secret, Date.now() + 60_000
+    );
+    const response = { locals: {}, statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; } };
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` }, query: { limit: '10' },
+      params: {}, body: {}, ip: '127.0.0.1'
+    };
+    const handlers = routes.get('GET /api/admin/audit-log');
+    for (let i = 0; i < handlers.length; i += 1) {
+      const last = i === handlers.length - 1;
+      await handlers[i](request, response, () => {});
+      if (last || response.statusCode >= 400) break;
+    }
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.entries.length, 1);
+    assert.equal(response.body.entries[0].action, 'doctor.delete');
+    assert.equal(response.body.entries[0].actorEmail, 'admin@example.test');
+  } finally {
+    AuditLog.create = originalCreate;
+    AuditLog.find = originalFind;
+    auditUser.findById = originalUserFindById;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+});

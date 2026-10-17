@@ -322,12 +322,30 @@
             <h1 id="appointments-title" class="mt-1 text-2xl font-extrabold tracking-tight text-slate-900">Appointments</h1>
           </div>
           <div class="flex flex-wrap items-end gap-3">
-            <form id="date-form" class="flex items-end gap-2">
+            <form id="date-form" class="flex flex-wrap items-end gap-2">
               <div>
-                <label class="label" for="report-date">Clinic date</label>
+                <label class="label" for="report-date">From</label>
                 <input id="report-date" class="field" type="date" required>
               </div>
+              <div>
+                <label class="label" for="report-date-to">To</label>
+                <input id="report-date-to" class="field" type="date">
+              </div>
+              <div>
+                <label class="label" for="appointment-search">Search patient</label>
+                <input id="appointment-search" class="field" type="search" placeholder="Name or number">
+              </div>
+              <div>
+                <label class="label" for="appointment-range">Quick range</label>
+                <select id="appointment-range" class="field">
+                  <option value="1">Today</option>
+                  <option value="7" selected>Next 7 days</option>
+                  <option value="14">Next 14 days</option>
+                  <option value="30">Next 30 days</option>
+                </select>
+              </div>
               <button class="btn btn-primary" type="submit">View</button>
+              <button id="export-appointments" class="btn btn-outline" type="button">Export CSV</button>
             </form>
             <button id="refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
           </div>
@@ -336,7 +354,7 @@
         <div class="overflow-x-auto">
           <table class="data">
             <thead>
-              <tr><th>Patient</th><th>WhatsApp</th><th>Symptoms</th><th>Slot</th></tr>
+              <tr><th>Patient</th><th>WhatsApp</th><th>Reason</th><th>Slot</th><th>Manage</th></tr>
             </thead>
             <tbody id="appointments"></tbody>
           </table>
@@ -528,6 +546,25 @@
         <div class="border-t border-slate-100">
           <div class="p-5 sm:p-6">
             <div class="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 class="text-sm font-bold text-slate-900">Admin activity</h3>
+                <p class="hint mt-1">Every clinic created, edited, suspended or deleted, with who did it.</p>
+              </div>
+              <button id="admin-audit-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+            </div>
+            <div class="mt-3 overflow-x-auto">
+              <table class="data">
+                <thead>
+                  <tr><th>When</th><th>Who</th><th>Action</th><th>Clinic</th><th>Detail</th></tr>
+                </thead>
+                <tbody id="admin-audit"></tbody>
+              </table>
+            </div>
+            <p id="admin-audit-empty" class="hint mt-3" hidden>No admin activity recorded yet.</p>
+          </div>
+          <div class="border-t border-slate-100">
+          <div class="p-5 sm:p-6">
+            <div class="flex flex-wrap items-center justify-between gap-3">
               <h3 class="text-sm font-bold text-slate-900">Operational logs</h3>
               <div class="flex items-center gap-2">
                 <select id="admin-logs-level" class="field !w-auto">
@@ -652,6 +689,9 @@
     let editingClinicSetup = false;
     let editingAdminDoctorId = null;
     let currentRole = null;
+// The clinic's own zone, learned from the first appointments response, so date
+// pickers and quick ranges line up with how the clinic thinks about a day.
+let clinicTimeZone = 'Asia/Karachi';
 
     // Only show navigation that resolves to something actually on screen: the
     // doctor sections are hidden from a superadmin, and the appointments and
@@ -995,6 +1035,35 @@ function asArray(value) {
         adminLogsBody.append(row);
       }
       adminLogsEmpty.hidden = asArray(logs.logs).length > 0;
+
+      // Admin activity is fetched separately so a slow or failing audit read cannot
+      // stop the rest of the panel from rendering.
+      const auditBody = document.querySelector('#admin-audit');
+      const auditEmpty = document.querySelector('#admin-audit-empty');
+      adminFetch('/api/admin/audit-log?limit=50')
+        .then((audit) => {
+          auditBody.replaceChildren();
+          auditEmpty.hidden = asArray(audit.entries).length > 0;
+          for (const entry of asArray(audit.entries)) {
+            const row = document.createElement('tr');
+            const cells = [
+              new Date(entry.createdAt).toLocaleString(),
+              entry.actorEmail || entry.actorId,
+              entry.action,
+              entry.targetLabel || entry.targetDoctorId || '—',
+              entry.detail || ''
+            ];
+            cells.forEach((value, index) => {
+              const cell = document.createElement('td');
+              cell.textContent = value;
+              if (index === 0) cell.className = 'whitespace-nowrap text-ink-soft';
+              if (index === 2) cell.className = 'font-mono text-xs';
+              row.append(cell);
+            });
+            auditBody.append(row);
+          }
+        })
+        .catch((error) => { auditBody.replaceChildren(); auditEmpty.textContent = error.message; auditEmpty.hidden = false; });
       return system;
     }
 
@@ -1112,8 +1181,7 @@ function asArray(value) {
     async function loadAppointments() {
       notice.hidden = true;
       rows.replaceChildren();
-      const query = dateInput.value ? `?date=${encodeURIComponent(dateInput.value)}` : '';
-      const response = await fetch(`/api/dashboard/appointments${query}`, { credentials: 'same-origin' });
+      const response = await fetch(`/api/dashboard/appointments${appointmentQuery()}`, { credentials: 'same-origin' });
       if (response.status === 401) {
         loginSection.hidden = false;
         dashboardSection.hidden = true;
@@ -1125,27 +1193,43 @@ function asArray(value) {
       if (!response.ok) throw new Error('Could not load appointments. Please try again.');
 
       const data = await response.json();
-      dateInput.value = data.date;
-      count.textContent = `${data.appointments.length} appointment${data.appointments.length === 1 ? '' : 's'} on ${data.date}`;
-      emptyState.hidden = data.appointments.length > 0;
-      if (statToday) statToday.textContent = String(data.appointments.length);
-      if (statTodayLabel) statTodayLabel.textContent = `booked on ${data.date}`;
-      const slotStartFormatter = new Intl.DateTimeFormat(undefined, {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-        timeZone: data.timeZone
+      clinicTimeZone = data.timeZone || clinicTimeZone;
+      const total = data.appointments.length;
+      // A range is described as a range and a single day as one day, so the heading
+      // never claims one date while showing several.
+      const spanLabel = data.from === data.to ? data.from : `${data.from} to ${data.to}`;
+      count.textContent = data.search
+        ? `${total} appointment${total === 1 ? '' : 's'} matching "${data.search}" in ${spanLabel}`
+        : `${total} appointment${total === 1 ? '' : 's'} in ${spanLabel}`;
+      emptyState.hidden = total > 0;
+      if (statToday) statToday.textContent = String(total);
+      if (statTodayLabel) statTodayLabel.textContent = `booked in ${spanLabel}`;
+      const dayFormatter = new Intl.DateTimeFormat(undefined, {
+        weekday: 'long', dateStyle: 'medium', timeZone: data.timeZone
       });
-      const slotEndFormatter = new Intl.DateTimeFormat(undefined, {
-        timeStyle: 'short',
-        timeZone: data.timeZone
-      });
+      const slotStartFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: 'short', timeZone: data.timeZone });
+      const slotEndFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: 'short', timeZone: data.timeZone });
+
+      let currentDay = null;
       for (const appointment of data.appointments) {
+        const dayLabel = dayFormatter.format(new Date(appointment.slotStart));
+        // Only insert a day separator when more than one day is in view.
+        if (data.grouped && dayLabel !== currentDay) {
+          currentDay = dayLabel;
+          const separator = document.createElement('tr');
+          const cell = document.createElement('td');
+          cell.colSpan = 5;
+          cell.className = 'bg-slate-50 font-bold text-slate-700 text-xs uppercase tracking-wide';
+          cell.textContent = dayLabel;
+          separator.append(cell);
+          rows.append(separator);
+        }
         const row = document.createElement('tr');
         const values = [
           appointment.patientName,
           appointment.whatsAppNumber,
           appointment.symptoms,
-          `${slotStartFormatter.format(new Date(appointment.slotStart))} - ${slotEndFormatter.format(new Date(appointment.slotEnd))} (${data.timeZone})`
+          `${slotStartFormatter.format(new Date(appointment.slotStart))} - ${slotEndFormatter.format(new Date(appointment.slotEnd))}`
         ];
         values.forEach((value, index) => {
           const cell = document.createElement('td');
@@ -1155,7 +1239,92 @@ function asArray(value) {
           if (index === 3) cell.className = 'whitespace-nowrap font-medium text-slate-700';
           row.append(cell);
         });
+        const actions = document.createElement('td');
+        actions.className = 'whitespace-nowrap';
+        const rescheduleButton = document.createElement('button');
+        rescheduleButton.type = 'button';
+        rescheduleButton.className = 'btn btn-outline btn-sm !mr-2';
+        rescheduleButton.textContent = 'Reschedule';
+        rescheduleButton.addEventListener('click', () => promptReschedule(appointment, data.timeZone));
+        const cancelButton = document.createElement('button');
+        cancelButton.type = 'button';
+        cancelButton.className = 'btn btn-danger-ghost btn-sm';
+        cancelButton.textContent = 'Cancel';
+        cancelButton.addEventListener('click', () => cancelAppointment(appointment));
+        actions.append(rescheduleButton, cancelButton);
+        row.append(actions);
         rows.append(row);
+      }
+    }
+
+    // Builds the query used by both the list and the export so the two always agree.
+    function appointmentQuery() {
+      const params = new URLSearchParams();
+      const from = document.querySelector('#report-date').value;
+      const to = document.querySelector('#report-date-to').value;
+      const search = document.querySelector('#appointment-search').value.trim();
+      if (from) params.set('from', from);
+      if (to) params.set('to', to);
+      if (search) params.set('q', search);
+      const query = params.toString();
+      return query ? `?${query}` : '';
+    }
+
+    async function cancelAppointment(appointment) {
+      if (!appointment.id) return;
+      if (!window.confirm(`Cancel the appointment for ${appointment.patientName}? The slot will be released.`)) return;
+      try {
+        const response = await fetch(`/api/dashboard/appointments/${encodeURIComponent(appointment.id)}/cancel`, {
+          method: 'POST', credentials: 'same-origin'
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || 'Could not cancel the appointment.');
+        showBanner(
+          `Cancelled the appointment for ${appointment.patientName}.`
+          + (result.calendarRemoved ? ' The calendar event was removed too.' : ''),
+          'success'
+        );
+        await loadAppointments();
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    async function promptReschedule(appointment, timeZone) {
+      const suggested = new Date(new Date(appointment.slotStart).getTime() + 24 * 60 * 60 * 1000);
+      // The suggested value must be expressed in the clinic's own zone, otherwise a
+      // slot would be offered at the wrong wall clock time.
+      const toLocalInput = (date) => {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+          timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+        }).formatToParts(date);
+        const get = (type) => parts.find((part) => part.type === type)?.value || '00';
+        return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+      };
+      const entered = window.prompt(
+        `Move ${appointment.patientName} to which slot?\n\nEnter the new date and time (${timeZone}), like ${toLocalInput(suggested)}.`,
+        toLocalInput(suggested)
+      );
+      if (entered === null) return;
+      const parsed = new Date(entered);
+      if (Number.isNaN(parsed.getTime())) {
+        showError('That is not a date and time this browser can read. Use the YYYY-MM-DDTHH:MM format.');
+        return;
+      }
+      try {
+        const response = await fetch(`/api/dashboard/appointments/${encodeURIComponent(appointment.id)}/reschedule`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ slotStart: parsed.toISOString() })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || 'Could not reschedule the appointment.');
+        showBanner(`Moved ${appointment.patientName} to the new slot.`, 'success');
+        await loadAppointments();
+      } catch (error) {
+        showError(error.message);
       }
     }
 
@@ -1759,6 +1928,33 @@ function readFacilityPricing() {
       }
     });
 
+    // Sets the from and to inputs from a day count starting today, so the common cases
+    // are one click rather than two date picks.
+    function applyAppointmentRange(days) {
+      const from = new Date();
+      const to = new Date(from.getTime() + (Number(days) - 1) * 24 * 60 * 60 * 1000);
+      const format = (date) => {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+          timeZone: clinicTimeZone, year: 'numeric', month: '2-digit', day: '2-digit'
+        }).formatToParts(date);
+        const get = (type) => parts.find((part) => part.type === type)?.value;
+        return `${get('year')}-${get('month')}-${get('day')}`;
+      };
+      document.querySelector('#report-date').value = format(from);
+      document.querySelector('#report-date-to').value = format(to);
+    }
+
+    document.querySelector('#appointment-range').addEventListener('change', (event) => {
+      applyAppointmentRange(event.target.value);
+      loadAppointments().catch((error) => showError(error.message));
+    });
+    document.querySelector('#appointment-search').addEventListener('search', () => {
+      loadAppointments().catch((error) => showError(error.message));
+    });
+    // The export must cover exactly what is on screen, so it reuses the same query.
+    document.querySelector('#export-appointments').addEventListener('click', () => {
+      window.location.assign(`/api/dashboard/appointments.csv${appointmentQuery()}`);
+    });
     document.querySelector('#date-form').addEventListener('submit', (event) => {
       event.preventDefault();
       loadAppointments().catch((error) => showError(error.message));
@@ -1966,6 +2162,9 @@ function readFacilityPricing() {
       loadAdminSystem().catch((error) => showError(error.message));
     });
     document.querySelector('#admin-logs-level').addEventListener('change', () => {
+      loadAdminSystem().catch((error) => showError(error.message));
+    });
+    document.querySelector('#admin-audit-refresh').addEventListener('click', () => {
       loadAdminSystem().catch((error) => showError(error.message));
     });
     document.querySelector('#admin-filter-upcoming').addEventListener('change', () => {
