@@ -509,6 +509,11 @@
         <div id="admin-remediation" class="px-5 sm:px-6 pb-5 sm:pb-6 space-y-3" hidden></div>
         <div class="px-5 sm:px-6 pb-5 sm:pb-6">
           <div class="flex flex-wrap items-center gap-3">
+            <button id="admin-gemini-test" class="btn btn-ghost btn-sm" type="button">Test Gemini extraction</button>
+            <p class="hint">Confirms the API key and the patient-data flag actually work, using a synthetic prompt with no patient data.</p>
+          </div>
+          <div id="admin-gemini-result" class="mt-3 space-y-1 text-sm"></div>
+          <div class="flex flex-wrap items-center gap-3 mt-4">
             <button id="admin-email-test" class="btn btn-ghost btn-sm" type="button">Test email delivery</button>
             <button id="admin-email-send" class="btn btn-ghost btn-sm" type="button">Send a test message</button>
             <p class="hint">Checks the SMTP host, TLS and credentials, then optionally sends one real message so a broken configuration is found now rather than the next morning.</p>
@@ -882,8 +887,8 @@ function asArray(value) {
           ['Gemini extraction', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'Enabled' : 'Disabled', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'good' : 'warn'],
           ['Daily email reports', system.configuration.smtpConfigured ? 'Configured' : 'Not configured', system.configuration.smtpConfigured ? 'good' : 'warn'],
           ['WhatsApp sessions persist', system.whatsapp.sessionPersistent ? 'Persistent' : 'Ephemeral', system.whatsapp.sessionPersistent ? 'good' : 'warn'],
-          ['Session folder writable', system.whatsapp.sessionWritable === false ? 'Read only' : 'Writable', system.whatsapp.sessionWritable === false ? 'warn' : 'good'],
-          ['Session path source', system.whatsapp.sessionSource || 'local']
+          ['Session storage', system.whatsapp.storage === 'mongodb' ? 'MongoDB' : (system.whatsapp.storage === 'disk' ? 'Persistent disk' : 'Ephemeral disk')],
+          ['Gemini extraction', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'Enabled' : 'Disabled', system.configuration.geminiConfigured && system.configuration.geminiPatientDataAllowed ? 'good' : 'warn']
         ])
       );
 
@@ -915,6 +920,21 @@ function asArray(value) {
         }
       }
 
+      const geminiButton = document.querySelector('#admin-gemini-test');
+      if (geminiButton) {
+        geminiButton.onclick = async () => {
+          const target = document.querySelector('#admin-gemini-result');
+          geminiButton.disabled = true;
+          target.textContent = 'Checking Gemini...';
+          try {
+            renderDiagnosticStages(target, (await adminFetch('/api/admin/diagnostics/gemini', { method: 'POST' })).stages);
+          } catch (error) {
+            target.textContent = error.message;
+          } finally {
+            geminiButton.disabled = false;
+          }
+        };
+      }
       const voiceResult = adminVoiceResult;
       adminVoiceResult.replaceChildren();
       renderDiagnosticStages(adminEmailResult, null);

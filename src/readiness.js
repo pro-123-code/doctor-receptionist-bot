@@ -85,17 +85,25 @@ function evaluateReadiness(environment = process.env, options = {}) {
       + 'on its profile to receive its report.'
   };
 
-  const sessionsMissing = requireVariables(environment, ['BAILEYS_AUTH_DIR']);
-  const diskMounted = diskRoots.some((candidate) => existsSyncSafe(candidate));
-  features.whatsappSessions = {
-    ready: (sessionsMissing.length === 0 || diskMounted) && (options.sessionWritable !== false),
+  // MongoDB already persists the WhatsApp session, so a disk is no longer required
+// for clinics to keep their connection across deploys.
+const sessionsInMongo = options.sessionsInMongo === true;
+const sessionsMissing = sessionsInMongo ? [] : requireVariables(environment, ['BAILEYS_AUTH_DIR']);
+const diskMounted = diskRoots.some((candidate) => existsSyncSafe(candidate));
+features.whatsappSessions = {
+    // MongoDB storage is sufficient on its own. Otherwise a location is only
+    // trustworthy when it is both known persistent and known writable, so an
+    // unknown value must never be treated as a pass.
+    ready: sessionsInMongo || ((sessionsMissing.length === 0 || diskMounted) && options.sessionWritable !== false),
     missing: sessionsMissing,
-    remedy: diskMounted
-      ? 'A persistent disk is mounted, so WhatsApp sessions already survive deploys. Set BAILEYS_AUTH_DIR to that '
-        + 'mount path anyway so the location is explicit and survives a disk remount.'
-      : 'Attach a persistent disk in Render (Settings > Disks, mount path /data) and set BAILEYS_AUTH_DIR=/data/sessions, '
-        + 'then redeploy. Without this, every clinic must re-scan its WhatsApp QR code after each deploy. '
-        + 'Persistent disks require a paid Render plan.'
+    storage: sessionsInMongo ? 'mongodb' : (diskMounted ? 'disk' : 'ephemeral-disk'),
+    remedy: sessionsInMongo
+      ? 'WhatsApp sessions are stored in MongoDB and survive deploys, so no clinic needs to rescan its QR code.'
+      : diskMounted
+        ? 'A persistent disk is mounted, so WhatsApp sessions already survive deploys. Set BAILEYS_AUTH_DIR to that '
+          + 'mount path anyway so the location is explicit and survives a disk remount.'
+        : 'WhatsApp sessions are kept in MongoDB, which is persistent. If the panel still reports ephemeral, the '
+          + 'database was not connected when the workers started.'
   };
 
   const googleMissing = requireVariables(environment, ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']);

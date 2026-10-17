@@ -1,15 +1,30 @@
 const { GoogleGenAI, Type } = require('@google/genai');
 
+// Whether Gemini extraction is available, and exactly what is missing if it is not.
+// Read from the environment on every call so a redeployed configuration is reflected
+// without relying on module load order.
+function isGeminiEnabled(environment = process.env) {
+  const hasKey = Boolean(String(environment.GEMINI_API_KEY ?? '').trim());
+  const consent = String(environment.GEMINI_ALLOW_PHI_PROCESSING ?? '').trim().toLowerCase() === 'true';
+  const missing = [];
+  if (!hasKey) missing.push('GEMINI_API_KEY');
+  if (!consent) missing.push('GEMINI_ALLOW_PHI_PROCESSING');
+  return { enabled: missing.length === 0, hasKey, consent, missing };
+}
+
 function buildSystemInstruction(doctorProfile) {
-  if (!doctorProfile?.doctorName || !doctorProfile?.clinicName || !Array.isArray(doctorProfile.facilitiesList)) {
-    throw new Error('A complete doctor profile is required for Gemini prompting');
-  }
-  const services = Array.isArray(doctorProfile.servicesList) ? doctorProfile.servicesList : [];
+  const name = String(doctorProfile?.doctorName || '').trim();
+  const clinic = String(doctorProfile?.clinicName || '').trim();
+  // A profile that has not finished setup is normal, not an error. Throwing here
+  // made every extraction call fail for a clinic without priced items yet, which
+  // was reported as a Gemini failure rather than as a missing profile field.
+  const facilities = Array.isArray(doctorProfile?.facilitiesList) ? doctorProfile.facilitiesList : [];
+  const services = Array.isArray(doctorProfile?.servicesList) ? doctorProfile.servicesList : [];
 
   return [
-    `You are the empathetic, professional AI receptionist for ${doctorProfile.doctorName} at ${doctorProfile.clinicName}.`,
+    `You are the empathetic, professional AI receptionist for ${name || 'this clinic'}${clinic ? ` at ${clinic}` : ''}.`,
     'Always use Roman Urdu or Roman English for patient-facing conversational responses.',
-    `This clinic offers: ${doctorProfile.facilitiesList.join(', ')}.`,
+    facilities.length ? `This clinic offers: ${facilities.join(', ')}.` : 'This clinic has not published its facilities yet.',
     services.length ? `Treatments and services: ${services.join(', ')}.` : '',
     doctorProfile.consultationDetails ? `Consultation details: ${doctorProfile.consultationDetails}` : '',
     doctorProfile.welcomeMessage ? `Clinic welcome message: ${doctorProfile.welcomeMessage}` : '',
@@ -26,12 +41,13 @@ const client = process.env.GEMINI_API_KEY && allowPatientData
     httpOptions: { timeout: 8000 }
   })
   : null;
+const configuredModel = () => process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
 async function generateJson(prompt, properties, required, doctorProfile) {
   if (!client) return null;
 
   const response = await client.models.generateContent({
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    model: configuredModel(),
     contents: prompt,
     config: {
       temperature: 0,
@@ -85,4 +101,43 @@ async function extractSlotNumber(message, slots, formatSlot, doctorProfile) {
   return Number.isInteger(result?.slotNumber) ? result.slotNumber : null;
 }
 
-module.exports = { buildSystemInstruction, extractPatientField, extractSlotNumber };
+// Reports whether extraction can run and, when it is enabled, proves the provider
+// answers. Nothing about the key is returned. Uses a prompt with no patient data so
+// this can be run safely from the dashboard.
+async function diagnoseGemini(environment = process.env) {
+  const status = isGeminiEnabled(environment);
+  const stages = [];
+  const record = (stage, ok, detail) => { stages.push({ stage, ok, detail }); };
+
+  if (!status.hasKey) record('configuration', false, 'GEMINI_API_KEY is not set.');
+  else if (!status.consent) record('configuration', false, 'GEMINI_ALLOW_PHI_PROCESSING must be exactly true.');
+  else record('configuration', true, 'API key present and patient-data processing approved.');
+
+  if (!status.enabled) {
+    record('provider', false, 'Extraction is disabled, so the provider was not called.');
+    return { enabled: false, ready: false, stages, model: configuredModel() };
+  }
+
+  record('provider', true, `Model ${configuredModel()}.`);
+  try {
+    const result = await extractPatientField('name', 'My name is Test Patient', {
+      doctorName: 'Diagnostic', clinicName: 'Diagnostic Clinic', facilitiesList: [], servicesList: []
+    });
+    if (typeof result === 'string' && result.trim()) {
+      record('response', true, 'The provider returned a structured extraction.');
+      return { enabled: true, ready: true, stages, model: configuredModel() };
+    }
+    record('response', false, 'The provider answered but returned no value for a clear test input.');
+    return { enabled: true, ready: false, stages, model: configuredModel() };
+  } catch (error) {
+    const message = String(error?.message || error);
+    record('response', false, /API key not valid|API_KEY_INVALID|PERMISSION_DENIED|403/i.test(message)
+      ? 'The API key was rejected by Google. Check GEMINI_API_KEY.'
+      : /model.*not found|404/i.test(message)
+        ? `The model ${configuredModel()} is unavailable. Set GEMINI_MODEL to a model your key can use.`
+        : message);
+    return { enabled: true, ready: false, stages, model: configuredModel() };
+  }
+}
+
+module.exports = { buildSystemInstruction, diagnoseGemini, extractPatientField, extractSlotNumber, isGeminiEnabled };

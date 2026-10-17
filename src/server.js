@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
 const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { createMongoAuthState } = require('./whatsappAuthStore');
 const QRCode = require('qrcode');
 const mongoose = require('mongoose');
 const { Appointment, connectDatabase, deleteConversation, Doctor, getConversation, InboundMessage, InboundQueueLock, recordServiceLog, saveConversation } = require('./models');
@@ -1034,6 +1035,20 @@ function findPersistentDiskRoot() {
   return null;
 }
 
+// Set when MongoDB holds the sessions, which is what stops the QR rescan loop.
+// Kept here rather than only in getBaileysSessionInfo so the readiness panel and
+// the startup log agree with what the workers actually use.
+let whatsappAuthMode = null;
+const useMongoSessions = mongoose.connection.readyState === 1;
+
+async function clearWhatsAppAuthDirectory(authDirectory) {
+  try {
+    await fsPromises.rm(authDirectory, { recursive: true, force: true });
+  } catch {
+    // Leftover files are harmless once MongoDB is the source of truth.
+  }
+}
+
 function getBaileysAuthRoot() {
   const localDataRoot = process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share');
   const configuredRoot = process.env.BAILEYS_AUTH_DIR;
@@ -1067,19 +1082,22 @@ function isWritableDirectory(targetPath) {
 function getBaileysSessionInfo() {
   const { root, persistent, source, diskRoot } = getBaileysAuthRoot();
   const writable = isWritableDirectory(root);
+  const mongoBacked = useMongoSessions;
   return {
     authDirectory: root,
-    // An unwritable location cannot hold a session, so it is never reported as
-    // persistent regardless of how the path was chosen.
-    persistent: persistent && writable,
+    // MongoDB holds the session, so a wiped filesystem no longer forces a rescan.
+    persistent: mongoBacked || (persistent && writable),
     writable,
-    source,
+    source: mongoBacked ? 'mongodb' : source,
+    storage: mongoBacked ? 'mongodb' : (persistent && writable ? 'disk' : 'ephemeral-disk'),
     diskRoot,
-    notice: persistent && writable
+    notice: mongoBacked
       ? null
-      : 'WhatsApp device sessions are stored on an ephemeral filesystem and will be lost on every deploy. '
-        + 'Attach a persistent disk in Render (Settings > Disks, mount path /data) and set '
-        + 'BAILEYS_AUTH_DIR=/data/sessions, then redeploy.'
+      : (persistent && writable
+        ? null
+        : 'WhatsApp sessions are stored on an ephemeral filesystem and will be lost on every deploy. '
+          + 'Attach a persistent disk in Render (Settings > Disks, mount path /data) and set '
+          + 'BAILEYS_AUTH_DIR=/data/sessions, then redeploy.')
   };
 }
 
@@ -1128,7 +1146,23 @@ async function startDoctorWhatsApp(doctorProfile) {
       return;
     }
     await secureWhatsAppAuthDirectory(authDirectory);
-    const authState = await useMultiFileAuthState(authDirectory);
+    // Prefer MongoDB for the session. It survives deploys that wipe the
+    // filesystem, so a clinic stops having to rescan its QR code every release.
+    // The file store stays as a fallback for a deployment with no database.
+    let authState;
+    if (useMongoSessions) {
+      authState = createMongoAuthState(targetDoctorId);
+      const existingCreds = await authState.state.creds.get();
+      whatsappAuthMode = existingCreds ? 'mongodb' : 'mongodb-empty';
+      if (existingCreds) {
+        // A session previously stored on disk must not be left to compete with the
+        // database copy, so the files are cleared once MongoDB is the source.
+        await clearWhatsAppAuthDirectory(authDirectory);
+      }
+    } else {
+      authState = await useMultiFileAuthState(authDirectory);
+      whatsappAuthMode = 'file';
+    }
     saveCreds = authState.saveCreds;
     socket = makeWASocket({
       auth: authState.state,
@@ -1308,7 +1342,9 @@ async function startServer() {
   }
 
   const sessionInfo = getBaileysSessionInfo();
-  if (!sessionInfo.persistent) {
+  if (sessionInfo.storage === 'mongodb') {
+    writeStartupLog('WhatsApp sessions are stored in MongoDB and survive deploys, so clinics do not rescan their QR code.');
+  } else if (!sessionInfo.persistent) {
     writeStartupLog(`WhatsApp sessions at ${sessionInfo.authDirectory} are on an ephemeral filesystem and will be lost on every deploy. Set BAILEYS_AUTH_DIR to a mounted persistent disk.`);
   } else {
     writeStartupLog(`WhatsApp sessions persist at ${sessionInfo.authDirectory}`);

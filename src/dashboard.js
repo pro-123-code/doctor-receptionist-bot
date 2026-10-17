@@ -11,6 +11,7 @@ const { normalizeOffDays, normalizeWorkingDays } = require('./clinicSchedule');
 const { getReligiousHolidays } = require('./clinicSchedule');
 const { isValidRupeeAmount, normalizeFacilityPricing } = require('./facilityPricing');
 const { diagnoseEmailPipeline } = require('./emailDiagnostics');
+const { diagnoseGemini } = require('./gemini');
 const { diagnoseVoicePipeline } = require('./voiceTranscription');
 const { evaluateReadiness } = require('./readiness');
 const { normalizeClinicTimingInput, normalizeReportTime, resolveClinicTiming } = require('./clinicTiming');
@@ -1383,7 +1384,8 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
         // never their values, so the panel can tell an operator what to set.
         readiness: evaluateReadiness(process.env, {
           googleRedirectUriValid: oauthStatus.available,
-          sessionWritable: sessionInfo.writable !== false
+          sessionWritable: sessionInfo.writable !== false,
+          sessionsInMongo: sessionInfo.storage === 'mongodb'
         }),
         whatsapp: {
           authDirectory: sessionInfo.authDirectory || null,
@@ -1472,6 +1474,21 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     } catch (error) {
       console.error(`Doctor account deletion failed (${error?.name || 'Error'})`);
       response.status(503).json({ error: 'Doctor account could not be deleted' });
+    }
+  });
+
+  app.post('/api/admin/diagnostics/gemini', requireDashboardAuth, requireSuperadmin, async (_request, response) => {
+    try {
+      const result = await diagnoseGemini();
+      response.json({
+        enabled: result.enabled,
+        ready: result.ready,
+        stages: result.stages,
+        model: result.model
+      });
+    } catch (error) {
+      console.error(`Gemini diagnostics failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Gemini diagnostics could not run' });
     }
   });
 

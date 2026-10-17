@@ -3851,3 +3851,175 @@ test('a superadmin save can change one field without disturbing the rest', async
   assert.deepEqual(Object.keys(persisted).sort(), ['reportTime', 'setupComplete', 'updatedAt'],
     'a partial edit must only touch the fields it supplied, plus bookkeeping');
 });
+// A minimal in-memory stand-in for the WhatsAppAuthState collection so the store
+// logic can be verified without a database. It mirrors only the operations the
+// store actually uses.
+function createFakeCollection(seed = []) {
+  const rows = seed.map((row) => ({ ...row }));
+  const matches = (row, filter) => Object.entries(filter).every(([key, value]) => {
+    if (key === 'storeId' && value && typeof value === 'object' && Array.isArray(value.$in)) {
+      return value.$in.includes(row.storeId);
+    }
+    return row[key] === value;
+  });
+
+  // Mongoose returns a chainable query, not a promise, so the fake must too.
+  const query = (produce) => {
+    const chain = {
+      lean: async () => produce(),
+      sort: () => chain,
+      limit: () => chain
+    };
+    chain.then = (onFulfilled, onRejected) => produce().then(onFulfilled, onRejected);
+    chain.catch = (onRejected) => produce().catch(onRejected);
+    return chain;
+  };
+
+  const Model = {
+    __rows: rows,
+    findOne(filter) {
+      return query(() => {
+        const found = rows.find((row) => matches(row, filter)) || null;
+        return found ? { ...found } : null;
+      });
+    },
+    find(filter) {
+      return query(() => rows.filter((row) => matches(row, filter)).map((row) => ({ ...row })));
+    },
+    async updateOne(filter, update, options = {}) {
+      const existing = rows.find((row) => matches(row, filter));
+      if (existing) Object.assign(existing, update.$set);
+      else if (options.upsert) rows.push({ ...filter, ...update.$set });
+      return { matchedCount: existing ? 1 : 0 };
+    },
+    async deleteMany(filter) {
+      const kept = rows.filter((row) => !matches(row, filter));
+      const removed = rows.length - kept.length;
+      rows.length = 0;
+      rows.push(...kept);
+      return { deletedCount: removed };
+    },
+    async bulkWrite(operations) {
+      for (const operation of operations) {
+        if (operation.deleteOne) await Model.deleteOne(operation.deleteOne.filter);
+        if (operation.updateOne) {
+          await Model.updateOne(operation.updateOne.filter, operation.updateOne.update,
+            { upsert: operation.updateOne.upsert });
+        }
+      }
+      return { ok: 1 };
+    },
+    async deleteOne(filter) {
+      const index = rows.findIndex((row) => matches(row, filter));
+      if (index >= 0) rows.splice(index, 1);
+      return { deletedCount: index >= 0 ? 1 : 0 };
+    }
+  };
+  return Model;
+}
+
+// The store takes its model by injection, so these tests need no database and no
+// monkey patching of the global mongoose model registry.
+function withFakeAuthCollection(run) {
+  return run(createFakeCollection());
+}
+
+test('the WhatsApp auth store saves and restores credentials in MongoDB', async () => {
+  await withFakeAuthCollection(async (Model) => {
+    const { createMongoAuthState } = require('../src/whatsappAuthStore');
+    const auth = createMongoAuthState('clinic-mongo', { Model });
+
+    assert.equal(await auth.state.creds.get(), null, 'a new clinic starts with no credentials');
+
+    const creds = { me: { id: '923001234567:12@s.whatsapp.net' }, registered: true, pairingCode: 'ABC' };
+    await auth.saveCreds(creds);
+
+    const restored = await auth.state.creds.get();
+    assert.equal(restored.registered, true);
+    assert.equal(restored.me.id, creds.me.id);
+    assert.equal(restored.pairingCode, 'ABC');
+  });
+});
+
+test('signal keys round trip through MongoDB as buffers', async () => {
+  await withFakeAuthCollection(async (Model) => {
+    const { createMongoAuthState } = require('../src/whatsappAuthStore');
+    const auth = createMongoAuthState('clinic-keys', { Model });
+
+    await auth.state.keys.set({ 'pre-key': { 'PK-1': new Uint8Array([1, 2, 3, 250]) } });
+
+    const fetched = await auth.state.keys.get('pre-key', ['PK-1']);
+    assert.ok(fetched['PK-1'], 'the stored key must be returned');
+    assert.ok(Buffer.isBuffer(fetched['PK-1']), 'binary keys must be stored as buffers');
+    assert.deepEqual([...Buffer.from(fetched['PK-1'])], [1, 2, 3, 250]);
+
+    const partial = await auth.state.keys.get('pre-key', ['PK-1', 'MISSING']);
+    assert.ok(partial['PK-1']);
+    assert.equal(partial.MISSING, undefined, 'an unknown key is absent, not an error');
+    assert.deepEqual(await auth.state.keys.get('pre-key', []), {}, 'an empty id list short circuits');
+  });
+});
+
+test('a null value deletes the key, as Baileys expects', async () => {
+  await withFakeAuthCollection(async (Model) => {
+    const { createMongoAuthState } = require('../src/whatsappAuthStore');
+    const auth = createMongoAuthState('clinic-del', { Model });
+
+    await auth.state.keys.set({ session: { 'S-1': new Uint8Array([9]) } });
+    assert.ok((await auth.state.keys.get('session', ['S-1']))['S-1']);
+
+    await auth.state.keys.set({ session: { 'S-1': null } });
+    assert.equal((await auth.state.keys.get('session', ['S-1']))['S-1'], undefined,
+      'a null value must remove the stored key');
+  });
+});
+
+test('each clinic session is isolated and wiping one leaves the others intact', async () => {
+  await withFakeAuthCollection(async (Model) => {
+    const { createMongoAuthState } = require('../src/whatsappAuthStore');
+    const first = createMongoAuthState('clinic-a', { Model });
+    const second = createMongoAuthState('clinic-b', { Model });
+
+    await first.saveCreds({ me: { id: 'a@s.whatsapp.net' }, registered: true });
+    await second.saveCreds({ me: { id: 'b@s.whatsapp.net' }, registered: true });
+
+    assert.equal((await first.state.creds.get()).me.id, 'a@s.whatsapp.net');
+    assert.equal((await second.state.creds.get()).me.id, 'b@s.whatsapp.net');
+
+    await first.wipe();
+    assert.equal(await first.state.creds.get(), null);
+    assert.equal((await second.state.creds.get()).me.id, 'b@s.whatsapp.net',
+      'wiping one clinic must not remove another clinic session');
+  });
+});
+
+test('every stored document carries its clinic so a clinic can be wiped safely', async () => {
+  await withFakeAuthCollection(async (Model) => {
+    const { createMongoAuthState } = require('../src/whatsappAuthStore');
+    const auth = createMongoAuthState('clinic-scoped', { Model });
+    await auth.state.keys.set({ 'sender-key': { 'SK-1': new Uint8Array([5]) } });
+
+    const rows = auth.Model.__rows;
+    assert.ok(rows.length > 0);
+    assert.ok(rows.every((row) => row.doctorId === 'clinic-scoped'));
+  });
+});
+
+test('expiring key types get a retention date and durable key types do not', async () => {
+  await withFakeAuthCollection(async (Model) => {
+    const { createMongoAuthState } = require('../src/whatsappAuthStore');
+    await Model.deleteMany({});
+    const auth = createMongoAuthState('clinic-ttl', { Model });
+
+    await auth.state.keys.set({
+      'pre-key': { 'PK-1': new Uint8Array([1]) },
+      session: { 'S-1': new Uint8Array([2]) }
+    });
+
+    const preKey = auth.Model.__rows.find((row) => row.storeType === 'pre-key');
+    const session = auth.Model.__rows.find((row) => row.storeType === 'session');
+    assert.equal(preKey.expiresAt, null,
+      'pre keys must not expire, or encrypted history becomes undecryptable');
+    assert.ok(session.expiresAt instanceof Date, 'session state should be given a retention date');
+  });
+});
