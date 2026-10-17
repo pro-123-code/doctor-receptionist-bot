@@ -3463,3 +3463,391 @@ test('an unconfigured report is a warning, not a clinic error', async () => {
     ServiceLog.create = originals.serviceLogCreate;
   }
 });
+// Audits every dashboard field end to end: the value the form sends, the value the
+// server writes to Mongo, and the value it echoes back. Any field that is dropped
+// between those three points is reported.
+function buildApp() {
+  const routes = new Map();
+  const app = {
+    use() {},
+    get: (p, ...h) => routes.set(`GET ${p}`, h),
+    post: (p, ...h) => routes.set(`POST ${p}`, h),
+    put: (p, ...h) => routes.set(`PUT ${p}`, h),
+    patch: (p, ...h) => routes.set(`PATCH ${p}`, h),
+    delete: (p, ...h) => routes.set(`DELETE ${p}`, h)
+  };
+  return { app, routes };
+}
+
+const BASE_DOCTOR = {
+  doctorId: 'clinic-audit',
+  doctorName: 'Dr. Audit',
+  clinicName: 'Audit Clinic',
+  email: 'audit@example.test',
+  religion: 'Muslim',
+  basicCheckupFee: 500,
+  facilityPricing: [{ category: 'facility', name: 'Consultation', price: 500 }],
+  consultationDetails: 'Consultation charges Rs. 1500',
+  workingDays: [1, 2, 3, 4, 5],
+  offDays: [],
+  religiousHolidayOpenDays: [],
+  welcomeMessage: 'Welcome',
+  officeStartHour: 9,
+  officeEndHour: 17,
+  appointmentDurationMinutes: 30,
+  appointmentLookaheadDays: 7,
+  reportTime: '00:00',
+  isActive: true,
+  googleCalendarId: 'primary',
+  googleCalendarConnected: false
+};
+
+// Each entry is a field the dashboard lets a user change, the value we submit, and
+// the key the database must store it under.
+const DOCTOR_FIELDS = [
+  ['doctorName', 'Dr. Changed'],
+  ['clinicName', 'Renamed Clinic'],
+  ['religion', 'Hindu'],
+  ['basicCheckupFee', 750],
+  ['consultationDetails', 'Changed consultation text'],
+  ['welcomeMessage', 'Changed welcome text'],
+  ['officeStartHour', 10],
+  ['officeEndHour', 19],
+  ['appointmentDurationMinutes', 45],
+  ['appointmentLookaheadDays', 21],
+  ['reportTime', '08:45'],
+  ['facilityPricing', [{ category: 'service', name: 'New Treatment', price: 1200 }]],
+  ['workingDays', [2, 3, 4]],
+  ['offDays', ['2026-12-25']],
+  ['religiousHolidayOpenDays', []]
+];
+
+async function saveAsDoctor(body) {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'audit-doctor-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const Doctor = mongoose.models.Doctor;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const Appointment = mongoose.models.Appointment;
+  const originals = {
+    userFindById: DashboardUser.findById,
+    doctorFindOne: Doctor.findOne,
+    findOneAndUpdate: Doctor.findOneAndUpdate
+  };
+  let persisted;
+  const doctor = { ...BASE_DOCTOR };
+  DashboardUser.findById = () => ({
+    lean: async () => ({ _id: 'd', role: 'DOCTOR', doctorId: doctor.doctorId, isActive: true })
+  });
+  Doctor.findOne = () => ({ lean: async () => ({ ...doctor }) });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    persisted = update.$set;
+    return { lean: async () => ({ ...doctor, ...update.$set }) };
+  };
+  try {
+    const { app, routes } = buildApp();
+    mountDashboard(app, Appointment, 'Asia/Karachi', doctor.doctorId, {
+      getWhatsAppSessionInfo: () => ({ authDirectory: '/tmp/doctorbot-audit', persistent: true })
+    });
+    const token = createSessionToken(
+      { _id: 'd', role: 'DOCTOR', doctorId: doctor.doctorId, isActive: true }, secret, Date.now() + 60_000
+    );
+    const response = {
+      locals: { doctor: { ...doctor } }, statusCode: 200,
+      status(c) { this.statusCode = c; return this; },
+      json(b) { this.body = b; }
+    };
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` }, query: {}, params: {}, body
+    };
+    const handlers = routes.get('PUT /api/dashboard/settings');
+    for (let i = 0; i < handlers.length; i += 1) {
+      const last = i === handlers.length - 1;
+      await handlers[i](request, response, () => {});
+      if (last || response.statusCode >= 400) break;
+    }
+    return { response, persisted };
+  } finally {
+    DashboardUser.findById = originals.userFindById;
+    Doctor.findOne = originals.doctorFindOne;
+    Doctor.findOneAndUpdate = originals.findOneAndUpdate;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+}
+
+test('every clinic setup field the doctor can change is written to the database', async () => {
+  const baseBody = {
+    doctorName: BASE_DOCTOR.doctorName,
+    clinicName: BASE_DOCTOR.clinicName,
+    religion: BASE_DOCTOR.religion,
+    basicCheckupFee: BASE_DOCTOR.basicCheckupFee,
+    facilityPricing: BASE_DOCTOR.facilityPricing,
+    consultationDetails: BASE_DOCTOR.consultationDetails,
+    workingDays: BASE_DOCTOR.workingDays,
+    offDays: BASE_DOCTOR.offDays,
+    religiousHolidayOpenDays: BASE_DOCTOR.religiousHolidayOpenDays,
+    welcomeMessage: BASE_DOCTOR.welcomeMessage,
+    officeStartHour: BASE_DOCTOR.officeStartHour,
+    officeEndHour: BASE_DOCTOR.officeEndHour,
+    appointmentDurationMinutes: BASE_DOCTOR.appointmentDurationMinutes,
+    appointmentLookaheadDays: BASE_DOCTOR.appointmentLookaheadDays,
+    reportTime: BASE_DOCTOR.reportTime
+  };
+
+  const dropped = [];
+  for (const [field, value] of DOCTOR_FIELDS) {
+    const { response, persisted } = await saveAsDoctor({ ...baseBody, [field]: value });
+    assert.equal(response.statusCode, 200,
+      `changing ${field} was rejected -> ${response.body && response.body.error}`);
+    assert.ok(persisted, `changing ${field} produced no database write`);
+    const stored = persisted[field];
+    if (JSON.stringify(stored) !== JSON.stringify(value)) {
+      dropped.push(`${field}: sent ${JSON.stringify(value)}, stored ${JSON.stringify(stored)}`);
+    }
+  }
+  assert.deepEqual(dropped, [], 'these fields do not reach the database');
+});
+
+test('facilityPricing updates also rebuild the derived facility and service name lists', async () => {
+  const body = {
+    doctorName: BASE_DOCTOR.doctorName,
+    clinicName: BASE_DOCTOR.clinicName,
+    religion: BASE_DOCTOR.religion,
+    basicCheckupFee: BASE_DOCTOR.basicCheckupFee,
+    consultationDetails: BASE_DOCTOR.consultationDetails,
+    workingDays: BASE_DOCTOR.workingDays,
+    offDays: BASE_DOCTOR.offDays,
+    religiousHolidayOpenDays: BASE_DOCTOR.religiousHolidayOpenDays,
+    welcomeMessage: BASE_DOCTOR.welcomeMessage,
+    officeStartHour: BASE_DOCTOR.officeStartHour,
+    officeEndHour: BASE_DOCTOR.officeEndHour,
+    appointmentDurationMinutes: BASE_DOCTOR.appointmentDurationMinutes,
+    appointmentLookaheadDays: BASE_DOCTOR.appointmentLookaheadDays,
+    reportTime: BASE_DOCTOR.reportTime,
+    facilityPricing: [
+      { category: 'facility', name: 'X-Ray', price: 900 },
+      { category: 'service', name: 'Physiotherapy', price: 1500 }
+    ]
+  };
+  const { response, persisted } = await saveAsDoctor(body);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(persisted.facilitiesList, ['X-Ray']);
+  assert.deepEqual(persisted.servicesList, ['Physiotherapy']);
+});
+
+test('the echoed response mirrors every stored value the dashboard reads back', async () => {
+  const body = {
+    doctorName: 'Dr. Echo',
+    clinicName: 'Echo Clinic',
+    religion: 'Other',
+    basicCheckupFee: 400,
+    facilityPricing: [{ category: 'facility', name: 'Echo Test', price: 250 }],
+    consultationDetails: 'Echo details',
+    workingDays: [1, 2],
+    offDays: [],
+    religiousHolidayOpenDays: [],
+    welcomeMessage: 'Echo welcome',
+    officeStartHour: 8,
+    officeEndHour: 20,
+    appointmentDurationMinutes: 20,
+    appointmentLookaheadDays: 3,
+    reportTime: '23:59'
+  };
+  const { response } = await saveAsDoctor(body);
+  assert.equal(response.statusCode, 200);
+  const echoed = response.body;
+  for (const [field, value] of Object.entries(body)) {
+    if (field === 'facilityPricing' || field === 'workingDays' || field === 'religiousHolidayOpenDays') continue;
+    assert.deepEqual(echoed[field], value, `${field} is not echoed back correctly`);
+  }
+  assert.equal(echoed.reportTime, '23:59');
+  assert.equal(echoed.facilityPricing[0].name, 'Echo Test');
+});
+
+test('invalid values are refused with a message that names the field', async () => {
+  const base = {
+    doctorName: BASE_DOCTOR.doctorName,
+    clinicName: BASE_DOCTOR.clinicName,
+    religion: BASE_DOCTOR.religion,
+    basicCheckupFee: BASE_DOCTOR.basicCheckupFee,
+    facilityPricing: BASE_DOCTOR.facilityPricing,
+    consultationDetails: BASE_DOCTOR.consultationDetails,
+    workingDays: BASE_DOCTOR.workingDays,
+    offDays: BASE_DOCTOR.offDays,
+    religiousHolidayOpenDays: BASE_DOCTOR.religiousHolidayOpenDays,
+    welcomeMessage: BASE_DOCTOR.welcomeMessage,
+    officeStartHour: BASE_DOCTOR.officeStartHour,
+    officeEndHour: BASE_DOCTOR.officeEndHour,
+    appointmentDurationMinutes: BASE_DOCTOR.appointmentDurationMinutes,
+    appointmentLookaheadDays: BASE_DOCTOR.appointmentLookaheadDays,
+    reportTime: BASE_DOCTOR.reportTime
+  };
+  const cases = [
+    ['reportTime', '99:99', /report time/i],
+    ['officeStartHour', 25, /timings/i],
+    ['appointmentLookaheadDays', 99, /timings/i],
+    ['religion', 'Atheist', /religion/i],
+    ['basicCheckupFee', -5, /checkup fee/i],
+    ['consultationDetails', '', /consultation/i]
+  ];
+  for (const [field, value, pattern] of cases) {
+    const { response } = await saveAsDoctor({ ...base, [field]: value });
+    assert.equal(response.statusCode, 400, `${field} = ${JSON.stringify(value)} was wrongly accepted`);
+    assert.match(response.body.error, pattern, `${field} error should name the field`);
+  }
+});
+
+test('an invalid change is rejected as a whole and stores nothing', async () => {
+  const base = {
+    doctorName: BASE_DOCTOR.doctorName,
+    clinicName: BASE_DOCTOR.clinicName,
+    religion: BASE_DOCTOR.religion,
+    basicCheckupFee: BASE_DOCTOR.basicCheckupFee,
+    facilityPricing: BASE_DOCTOR.facilityPricing,
+    consultationDetails: BASE_DOCTOR.consultationDetails,
+    workingDays: BASE_DOCTOR.workingDays,
+    offDays: BASE_DOCTOR.offDays,
+    religiousHolidayOpenDays: BASE_DOCTOR.religiousHolidayOpenDays,
+    welcomeMessage: BASE_DOCTOR.welcomeMessage,
+    officeStartHour: BASE_DOCTOR.officeStartHour,
+    officeEndHour: BASE_DOCTOR.officeEndHour,
+    appointmentDurationMinutes: BASE_DOCTOR.appointmentDurationMinutes,
+    appointmentLookaheadDays: BASE_DOCTOR.appointmentLookaheadDays,
+    reportTime: BASE_DOCTOR.reportTime
+  };
+  // A valid name change bundled with a bad report time must not partially save.
+  const { response, persisted } = await saveAsDoctor({ ...base, clinicName: 'Should Not Persist', reportTime: '99:99' });
+  assert.equal(response.statusCode, 400);
+  assert.equal(persisted, undefined, 'a rejected save must not write anything');
+});
+const ADMIN_FIELDS = [
+  ['doctorName', 'Dr. Admin Changed'],
+  ['clinicName', 'Admin Renamed'],
+  ['religion', 'Hindu'],
+  ['basicCheckupFee', 850],
+  ['consultationDetails', 'Admin consultation text'],
+  ['welcomeMessage', 'Admin welcome text'],
+  ['officeStartHour', 11],
+  ['officeEndHour', 21],
+  ['appointmentDurationMinutes', 20],
+  ['appointmentLookaheadDays', 12],
+  ['reportTime', '06:15'],
+  ['facilityPricing', [{ category: 'facility', name: 'Admin X-Ray', price: 1100 }]],
+  ['workingDays', [1, 3, 5]],
+  ['offDays', ['2026-12-26']]
+];
+
+async function saveAsAdmin(body) {
+  const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
+  const secret = 'audit-admin-session-secret-long-enough';
+  process.env.DASHBOARD_SESSION_SECRET = secret;
+  const Doctor = mongoose.models.Doctor;
+  const DashboardUser = mongoose.models.DashboardUser;
+  const originals = {
+    userFindById: DashboardUser.findById,
+    userFindOne: DashboardUser.findOne,
+    userUpdateMany: DashboardUser.updateMany,
+    doctorFindOne: Doctor.findOne,
+    findOneAndUpdate: Doctor.findOneAndUpdate
+  };
+  let persisted;
+  const doctor = { ...BASE_DOCTOR };
+  DashboardUser.findById = () => ({ lean: async () => ({ _id: 'a', role: 'SUPERADMIN', doctorId: null, isActive: true }) });
+  DashboardUser.findOne = () => ({ lean: async () => null });
+  DashboardUser.updateMany = async () => ({ modifiedCount: 0 });
+  Doctor.findOne = () => ({ lean: async () => ({ ...doctor }) });
+  Doctor.findOneAndUpdate = (filter, update) => {
+    persisted = update.$set;
+    return { lean: async () => ({ ...doctor, ...update.$set }) };
+  };
+  try {
+    const { app, routes } = buildApp();
+    mountDashboard(app, mongoose.models.Appointment, 'Asia/Karachi', null, {
+      getWhatsAppSessionInfo: () => ({ authDirectory: '/tmp/doctorbot-audit-admin', persistent: true })
+    });
+    const token = createSessionToken(
+      { _id: 'a', role: 'SUPERADMIN', doctorId: null, isActive: true }, secret, Date.now() + 60_000
+    );
+    const response = {
+      locals: {}, statusCode: 200,
+      status(c) { this.statusCode = c; return this; },
+      json(b) { this.body = b; }
+    };
+    const request = {
+      headers: { cookie: `doctorbot_dashboard=${token}` }, query: {},
+      params: { doctorId: doctor.doctorId }, body
+    };
+    const handlers = routes.get('PUT /api/admin/doctors/:doctorId');
+    for (let i = 0; i < handlers.length; i += 1) {
+      const last = i === handlers.length - 1;
+      await handlers[i](request, response, () => {});
+      if (last || response.statusCode >= 400) break;
+    }
+    return { response, persisted };
+  } finally {
+    DashboardUser.findById = originals.userFindById;
+    DashboardUser.findOne = originals.userFindOne;
+    DashboardUser.updateMany = originals.userUpdateMany;
+    Doctor.findOne = originals.doctorFindOne;
+    Doctor.findOneAndUpdate = originals.findOneAndUpdate;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SESSION_SECRET;
+    else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
+  }
+}
+
+test('every clinic setup field the superadmin edits is written to the database', async () => {
+  const dropped = [];
+  for (const [field, value] of ADMIN_FIELDS) {
+    const { response, persisted } = await saveAsAdmin({ [field]: value });
+    assert.equal(response.statusCode, 200,
+      `superadmin change to ${field} was rejected -> ${response.body && response.body.error}`);
+    assert.ok(persisted, `superadmin change to ${field} produced no database write`);
+    const stored = persisted[field];
+    if (JSON.stringify(stored) !== JSON.stringify(value)) {
+      dropped.push(`${field}: sent ${JSON.stringify(value)}, stored ${JSON.stringify(stored)}`);
+    }
+  }
+  assert.deepEqual(dropped, [], 'these superadmin fields do not reach the database');
+});
+
+test('the superadmin response echoes the stored clinic record for every editable field', async () => {
+  const body = {
+    doctorName: 'Dr. Verify', clinicName: 'Verify Clinic', religion: 'Other',
+    basicCheckupFee: 300, consultationDetails: 'Verify details', welcomeMessage: 'Verify welcome',
+    officeStartHour: 9, officeEndHour: 18, appointmentDurationMinutes: 45,
+    appointmentLookaheadDays: 5, reportTime: '05:05',
+    facilityPricing: [{ category: 'service', name: 'Verify Service', price: 300 }],
+    workingDays: [1, 2, 3, 4, 5], offDays: [], religiousHolidayOpenDays: []
+  };
+  const { response } = await saveAsAdmin(body);
+  assert.equal(response.statusCode, 200);
+  const echoed = response.body.doctor;
+  assert.equal(echoed.doctorName, 'Dr. Verify');
+  assert.equal(echoed.clinicName, 'Verify Clinic');
+  assert.equal(echoed.religion, 'Other');
+  assert.equal(echoed.basicCheckupFee, 300);
+  assert.equal(echoed.reportTime, '05:05', 'the report time must be echoed so the dashboard can verify it');
+  assert.equal(echoed.officeStartHour, 9);
+  assert.equal(echoed.officeEndHour, 18);
+  assert.equal(echoed.appointmentDurationMinutes, 45);
+  assert.equal(echoed.appointmentLookaheadDays, 5);
+  assert.equal(echoed.facilityPricing[0].name, 'Verify Service');
+  assert.deepEqual(echoed.facilitiesList, []);
+  assert.deepEqual(echoed.servicesList, ['Verify Service']);
+});
+
+test('an invalid superadmin change is refused and stores nothing', async () => {
+  for (const [field, value] of [['reportTime', '77:77'], ['basicCheckupFee', -1], ['religion', 'None']]) {
+    const { response, persisted } = await saveAsAdmin({ [field]: value });
+    assert.equal(response.statusCode, 400, `${field} = ${JSON.stringify(value)} was wrongly accepted`);
+    assert.equal(persisted, undefined, 'a rejected superadmin save must not write anything');
+  }
+});
+
+test('a superadmin save can change one field without disturbing the rest', async () => {
+  const { response, persisted } = await saveAsAdmin({ reportTime: '04:04' });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(Object.keys(persisted).sort(), ['reportTime', 'setupComplete', 'updatedAt'],
+    'a partial edit must only touch the fields it supplied, plus bookkeeping');
+});
