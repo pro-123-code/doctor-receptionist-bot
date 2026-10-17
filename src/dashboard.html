@@ -197,11 +197,12 @@
               <div>
                 <label class="label" for="appointment-duration">Slot length</label>
                 <select id="appointment-duration" class="field">
+                  <option value="5">5 minutes</option>
+                  <option value="10">10 minutes</option>
                   <option value="15">15 minutes</option>
                   <option value="20">20 minutes</option>
+                  <option value="25">25 minutes</option>
                   <option value="30">30 minutes</option>
-                  <option value="45">45 minutes</option>
-                  <option value="60">60 minutes</option>
                 </select>
               </div>
               <div>
@@ -1521,9 +1522,10 @@ function asArray(value) {
       const end = Number(settings.officeEndHour ?? 17);
       startSelect.value = String(Math.min(23, Math.max(0, start)));
       endSelect.value = String(Math.min(24, Math.max(1, end)));
-      durationSelect.value = String([15, 20, 30, 45, 60].includes(Number(settings.appointmentDurationMinutes))
-        ? Number(settings.appointmentDurationMinutes)
-        : 30);
+      durationSelect.value = String(
+        [5, 10, 15, 20, 25, 30].includes(Number(settings.appointmentDurationMinutes))
+          ? Number(settings.appointmentDurationMinutes)
+          : 30);
       lookaheadInput.value = String(Math.min(30, Math.max(1, Number(settings.appointmentLookaheadDays) || 7)));
       document.querySelector('#clinic-report-time').value = /^\d{2}:\d{2}$/.test(settings.reportTime || '')
         ? settings.reportTime

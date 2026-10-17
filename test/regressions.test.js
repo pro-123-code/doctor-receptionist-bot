@@ -24,7 +24,7 @@ const { resolveGoogleCredentials, verifyDoctorCalendarAccess } = require('../src
 const { createMailTransport, dispatchDoctorDailyReport, startDailyReportScheduler } = require('../src/cronJobs');
 const { privacyPolicy, termsOfService } = require('../src/legalPages');
 const { buildOfferOrder, formatSlotOffer, getSlotLocalDateKey, getZonedDateParts, isMoreSlotRequest, paginateSlots } = require('../src/slotOffers');
-const { currentLocalTime, isReportCatchUpDue, isReportDueNow, normalizeClinicTimingInput, normalizeReportTime, reportCatchUpMinutes, resolveClinicTiming } = require('../src/clinicTiming');
+const { SLOT_DURATION_OPTIONS, clampSlotDuration, currentLocalTime, isOfferedSlotDuration, isReportCatchUpDue, isReportDueNow, isValidHourSetting, LIMITS, normalizeClinicTimingInput, normalizeReportTime, reportCatchUpMinutes, resolveClinicTiming } = require('../src/clinicTiming');
 
 require('../src/models');
 
@@ -2165,13 +2165,13 @@ test('clinic timings fall back to environment defaults per doctor', () => {
   const environment = {
     OFFICE_START_HOUR: '8',
     OFFICE_END_HOUR: '20',
-    APPOINTMENT_DURATION_MINUTES: '45',
+    APPOINTMENT_DURATION_MINUTES: '20',
     APPOINTMENT_LOOKAHEAD_DAYS: '10'
   };
   assert.deepEqual(resolveClinicTiming({}, environment), {
     officeStartHour: 8,
     officeEndHour: 20,
-    appointmentDurationMinutes: 45,
+    appointmentDurationMinutes: 20,
     appointmentLookaheadDays: 10,
     usingEnvironment: true
   });
@@ -2182,6 +2182,47 @@ test('clinic timings fall back to environment defaults per doctor', () => {
     appointmentLookaheadDays: 7,
     usingEnvironment: true
   });
+  // An environment value outside the offered range is refused rather than used.
+  const outOfRange = resolveClinicTiming({}, { ...environment, APPOINTMENT_DURATION_MINUTES: '45' });
+  assert.equal(outOfRange.appointmentDurationMinutes, 30,
+    'an unsupported environment duration must fall back, not be clamped silently');
+});
+
+test('slot durations run from five to thirty minutes', () => {
+  assert.deepEqual(SLOT_DURATION_OPTIONS, [5, 10, 15, 20, 25, 30]);
+  assert.equal(LIMITS.appointmentDurationMinutes.min, 5);
+  assert.equal(LIMITS.appointmentDurationMinutes.max, 30);
+
+  for (const option of SLOT_DURATION_OPTIONS) {
+    assert.equal(isOfferedSlotDuration(option), true, `${option} must be offered`);
+    assert.ok(isValidHourSetting('appointmentDurationMinutes', option), `${option} must be accepted`);
+  }
+  for (const rejected of [1, 4, 45, 60, 240]) {
+    assert.equal(isValidHourSetting('appointmentDurationMinutes', rejected), false,
+      `${rejected} minutes must be rejected`);
+  }
+
+  // A duration saved before this range existed is clamped, not discarded, so the
+  // clinic keeps a sensible day length instead of reverting to the default.
+  assert.equal(clampSlotDuration(45), 30);
+  assert.equal(clampSlotDuration(60), 30);
+  assert.equal(clampSlotDuration(240), 30);
+  assert.equal(clampSlotDuration(1), 5);
+  assert.equal(clampSlotDuration(12), 10);
+  assert.equal(clampSlotDuration(23), 25);
+  assert.equal(clampSlotDuration(20), 20);
+  assert.equal(clampSlotDuration('30'), null, 'a non integer cannot be clamped');
+  assert.equal(resolveClinicTiming({ appointmentDurationMinutes: 60 }).appointmentDurationMinutes, 30);
+  assert.equal(resolveClinicTiming({ appointmentDurationMinutes: 45 }).appointmentDurationMinutes, 30);
+  assert.equal(resolveClinicTiming({ appointmentDurationMinutes: 5 }).appointmentDurationMinutes, 5);
+});
+
+test('system errors are removed from the database after twenty four hours', () => {
+  const ServiceLog = mongoose.models.ServiceLog;
+  const ttl = ServiceLog.schema.path('createdAt').options.expires;
+  assert.equal(typeof ttl, 'number', 'a string TTL is not a number Mongo can use');
+  assert.equal(ttl, 86400);
+  assert.equal(ttl / 3600, 24);
 });
 
 test('clinic timings stay unique per doctor with no cross-contamination', () => {
@@ -2190,7 +2231,7 @@ test('clinic timings stay unique per doctor with no cross-contamination', () => 
     doctorId: 'clinic-a', officeStartHour: 8, officeEndHour: 12, appointmentDurationMinutes: 30
   }, environment);
   const evening = resolveClinicTiming({
-    doctorId: 'clinic-b', officeStartHour: 16, officeEndHour: 22, appointmentDurationMinutes: 60
+    doctorId: 'clinic-b', officeStartHour: 16, officeEndHour: 22, appointmentDurationMinutes: 20
   }, environment);
 
   assert.deepEqual(
@@ -2199,7 +2240,7 @@ test('clinic timings stay unique per doctor with no cross-contamination', () => 
   );
   assert.deepEqual(
     [evening.officeStartHour, evening.officeEndHour, evening.appointmentDurationMinutes],
-    [16, 22, 60]
+    [16, 22, 20]
   );
   assert.notEqual(morning.officeStartHour, evening.officeStartHour);
   // A partially configured doctor inherits only what it has not set itself.
@@ -2214,8 +2255,12 @@ test('clinic timings reject invalid or inverted ranges', () => {
   assert.equal(normalizeClinicTimingInput({ officeStartHour: 9, officeEndHour: 9 }), null, 'zero-length window');
   assert.equal(normalizeClinicTimingInput({ officeStartHour: 25 }), null, 'hour above 23');
   assert.equal(normalizeClinicTimingInput({ officeEndHour: 0 }), null, 'hour below 1');
-  assert.equal(normalizeClinicTimingInput({ appointmentDurationMinutes: 5 }), null, 'slot too short');
-  assert.equal(normalizeClinicTimingInput({ appointmentDurationMinutes: 600 }), null, 'slot too long');
+  assert.equal(normalizeClinicTimingInput({ appointmentDurationMinutes: 4 }), null, 'slot below five minutes');
+  assert.equal(normalizeClinicTimingInput({ appointmentDurationMinutes: 31 }), null, 'slot above thirty minutes');
+  assert.equal(normalizeClinicTimingInput({ appointmentDurationMinutes: 45 }), null, 'the old maximum is no longer offered');
+  assert.equal(normalizeClinicTimingInput({ appointmentDurationMinutes: 60 }), null, 'the old maximum is no longer offered');
+  assert.equal(normalizeClinicTimingInput({ appointmentDurationMinutes: 5 }).appointmentDurationMinutes, 5, 'five minutes is valid');
+  assert.equal(normalizeClinicTimingInput({ appointmentDurationMinutes: 30 }).appointmentDurationMinutes, 30, 'thirty minutes is valid');
   assert.equal(normalizeClinicTimingInput({ appointmentLookaheadDays: 0 }), null);
   assert.equal(normalizeClinicTimingInput({ appointmentLookaheadDays: 31 }), null);
   assert.deepEqual(normalizeClinicTimingInput({}), {}, 'absent fields are left untouched');
@@ -3513,7 +3558,7 @@ const DOCTOR_FIELDS = [
   ['welcomeMessage', 'Changed welcome text'],
   ['officeStartHour', 10],
   ['officeEndHour', 19],
-  ['appointmentDurationMinutes', 45],
+  ['appointmentDurationMinutes', 25],
   ['appointmentLookaheadDays', 21],
   ['reportTime', '08:45'],
   ['facilityPricing', [{ category: 'service', name: 'New Treatment', price: 1200 }]],
@@ -3815,7 +3860,7 @@ test('the superadmin response echoes the stored clinic record for every editable
   const body = {
     doctorName: 'Dr. Verify', clinicName: 'Verify Clinic', religion: 'Other',
     basicCheckupFee: 300, consultationDetails: 'Verify details', welcomeMessage: 'Verify welcome',
-    officeStartHour: 9, officeEndHour: 18, appointmentDurationMinutes: 45,
+    officeStartHour: 9, officeEndHour: 18, appointmentDurationMinutes: 25,
     appointmentLookaheadDays: 5, reportTime: '05:05',
     facilityPricing: [{ category: 'service', name: 'Verify Service', price: 300 }],
     workingDays: [1, 2, 3, 4, 5], offDays: [], religiousHolidayOpenDays: []
@@ -3830,7 +3875,7 @@ test('the superadmin response echoes the stored clinic record for every editable
   assert.equal(echoed.reportTime, '05:05', 'the report time must be echoed so the dashboard can verify it');
   assert.equal(echoed.officeStartHour, 9);
   assert.equal(echoed.officeEndHour, 18);
-  assert.equal(echoed.appointmentDurationMinutes, 45);
+  assert.equal(echoed.appointmentDurationMinutes, 25);
   assert.equal(echoed.appointmentLookaheadDays, 5);
   assert.equal(echoed.facilityPricing[0].name, 'Verify Service');
   assert.deepEqual(echoed.facilitiesList, []);

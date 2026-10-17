@@ -92,7 +92,7 @@ if (environmentTiming.appointmentLookaheadDays < 3) {
     + 'its own booking window from the dashboard.');
 }
 if (
-  !Number.isInteger(appointmentDurationMinutes) || appointmentDurationMinutes < 15 ||
+  !Number.isInteger(appointmentDurationMinutes) || appointmentDurationMinutes < 5 || appointmentDurationMinutes > 30 ||
   !Number.isInteger(appointmentLookaheadDays) || appointmentLookaheadDays < 1 ||
   !Number.isInteger(officeStartHour) || !Number.isInteger(officeEndHour) ||
   officeStartHour < 0 || officeEndHour > 24 || officeStartHour >= officeEndHour

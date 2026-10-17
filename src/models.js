@@ -64,13 +64,18 @@ const appointmentSchema = new Schema({
 }, { timestamps: true, versionKey: false });
 appointmentSchema.index({ doctorId: 1, slotKey: 1 }, { unique: true });
 
+// Twenty four hours, as a plain number of seconds. This was the arithmetic
+// expression 60 * 60 * 24 * 30, which Mongo cannot use as a TTL value, so the
+// index never expired anything and the collection grew without bound.
+const SERVICE_LOG_TTL_SECONDS = 24 * 60 * 60;
+
 const serviceLogSchema = new Schema({
   doctorId: { type: String, required: true, index: true },
   clinicId: { type: String, required: true, index: true },
   level: { type: String, enum: ['error', 'warn', 'info'], required: true },
   event: { type: String, required: true, maxlength: 100 },
   code: { type: String, maxlength: 64 },
-  createdAt: { type: Date, default: Date.now, expires: 60 * 60 * 24 * 30 }
+  createdAt: { type: Date, default: Date.now, expires: SERVICE_LOG_TTL_SECONDS }
 }, { versionKey: false });
 
 const dashboardLoginAttemptSchema = new Schema({

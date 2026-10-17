@@ -13,9 +13,32 @@ const DEFAULTS = {
 const LIMITS = {
   officeStartHour: { min: 0, max: 23 },
   officeEndHour: { min: 1, max: 24 },
-  appointmentDurationMinutes: { min: 15, max: 240 },
+  // Short consultations, so a clinic can run a dense list. Five minutes is the
+  // floor and thirty the ceiling; anything outside is rejected rather than stored.
+  appointmentDurationMinutes: { min: 5, max: 30 },
   appointmentLookaheadDays: { min: 1, max: 30 }
 };
+
+// The durations a clinic can actually choose. The limits above bound the field, and
+// this is the offered set, so the dashboard never offers a value that is rejected.
+const SLOT_DURATION_OPTIONS = [5, 10, 15, 20, 25, 30];
+
+function isOfferedSlotDuration(value) {
+  return SLOT_DURATION_OPTIONS.includes(value);
+}
+
+// Clamps a stored duration into the offered set. A clinic saved at 45 or 60 minutes
+// before this range existed would otherwise fail validation and silently fall back
+// to the environment default, changing its day length without telling anyone.
+function clampSlotDuration(value) {
+  if (!Number.isInteger(value)) return null;
+  const options = SLOT_DURATION_OPTIONS;
+  if (options.includes(value)) return value;
+  if (value <= options[0]) return options[0];
+  if (value >= options[options.length - 1]) return options[options.length - 1];
+  return options.reduce((closest, option) =>
+    (Math.abs(option - value) < Math.abs(closest - value) ? option : closest));
+}
 
 function isValidHourSetting(name, value) {
   const limits = LIMITS[name];
@@ -61,7 +84,12 @@ function resolveClinicTiming(doctorProfile, environment = process.env) {
   const timing = {
     officeStartHour: pick('officeStartHour'),
     officeEndHour: pick('officeEndHour'),
-    appointmentDurationMinutes: pick('appointmentDurationMinutes'),
+    // Any stored integer is clamped into the offered set, so a duration saved as 45
+    // or 60 before this range existed becomes the nearest offered value instead of
+    // being discarded and silently replaced by the environment default.
+    appointmentDurationMinutes: Number.isInteger(doctorProfile?.appointmentDurationMinutes)
+      ? clampSlotDuration(doctorProfile.appointmentDurationMinutes)
+      : fallback.appointmentDurationMinutes,
     appointmentLookaheadDays: pick('appointmentLookaheadDays')
   };
   if (timing.officeStartHour >= timing.officeEndHour) {
@@ -153,6 +181,9 @@ module.exports = {
   DEFAULT_CATCH_UP_MINUTES,
   DEFAULTS,
   LIMITS,
+  SLOT_DURATION_OPTIONS,
+  clampSlotDuration,
+  isOfferedSlotDuration,
   currentLocalMinutes,
   currentLocalTime,
   isReportCatchUpDue,
