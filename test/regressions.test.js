@@ -4533,3 +4533,104 @@ test('the operational log index is never created automatically on connect', () =
     'automatic creation would hit the conflicting index and abort the connection');
   assert.equal(ServiceLog.schema.path('createdAt').options.expires, 86400);
 });
+test('every date formatter in the dashboard is one the runtime accepts', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'dashboard.html'), 'utf8');
+
+  // Combining a date style with individual parts such as the weekday is rejected by
+  // the runtime, which reports it only as "Invalid option" and gives no hint which
+  // one. That threw before any appointment row was drawn, so the table stayed empty
+  // and every action on it, search, reschedule, cancel and export, was unreachable
+  // while the suite was still green because nothing called this code.
+  const calls = [...html.matchAll(/new Intl\.DateTimeFormat\(\s*[^,]+,\s*(\{[\s\S]*?\})\s*\)/g)];
+  assert.ok(calls.length >= 3, 'the formatters must actually be found, or this test is useless');
+
+  // Each options object is built for real, so an illegal combination is caught
+  // however the surrounding code happens to name its variables.
+  const timeZone = 'Asia/Karachi';
+  const scope = new Proxy(
+    { Intl, data: { timeZone }, clinicTimeZone: timeZone, timeZone, undefined },
+    { has: () => true, get: (target, key) => (key in target ? target[key] : timeZone) }
+  );
+
+  for (const [, options] of calls) {
+    let built;
+    try {
+      built = new Function('scope', `with (scope) { return new Intl.DateTimeFormat(undefined, ${options}); }`)(scope);
+    } catch (error) {
+      assert.fail(`Intl.DateTimeFormat rejected ${options}: ${error.message}`);
+    }
+    assert.ok(built, 'a formatter must be produced');
+  }
+});
+
+test('the appointments table renders a row for each appointment', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'dashboard.html'), 'utf8');
+
+  // The formatters are built before the loop, so one bad formatter leaves the table
+  // permanently empty rather than showing an error per row. Each one is therefore
+  // constructed here with the time zone the server actually sends.
+  const start = html.indexOf('async function loadAppointments');
+  assert.ok(start > -1, 'loadAppointments must exist');
+  const body = html.slice(start, html.indexOf('function ', start + 10));
+  const timeZone = 'Asia/Karachi';
+
+  const found = [...body.matchAll(/new Intl\.DateTimeFormat\(([\s\S]*?)\)/g)];
+  assert.ok(found.length >= 3, 'the appointments view must build its formatters');
+  for (const [, raw] of found) {
+    const built = new Function('Intl', 'data', `return new Intl.DateTimeFormat(${raw});`)(
+      Intl, { timeZone }
+    );
+    assert.ok(built, 'each formatter must build against the live time zone');
+  }
+
+  // The separator needs a weekday, which is why the formatter asks for one.
+  const separatorUsesWeekday = /weekday:\s*'long'/.test(body);
+  assert.ok(separatorUsesWeekday, 'the day separator must still show the weekday');
+});
+
+test('the database session store is actually reachable', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+
+  // This was a constant read while the file was being required, which is always
+  // before the database has connected, so it was permanently false. The database
+  // session store was then unreachable, every clinic lost its session on each
+  // deploy, and the dashboard told doctors to mount a disk that could not help.
+  // The connection state can only be read when it is asked for, never captured once.
+  assert.ok(!/const\s+useMongoSessions\s*=/.test(source),
+    'the connection state must not be frozen at load time');
+
+  // A module level binding is one written at column zero. Reading the connection
+  // state inside a request or a function is correct, because that happens after the
+  // database has connected.
+  const frozenRead = source.split('\n')
+    .filter((line) => /^(?:const|let|var)\s/.test(line) && /connection\.readyState/.test(line));
+  assert.deepEqual(frozenRead, [],
+    'no module level binding may capture the connection state before it is connected');
+
+  assert.match(source, /if \(mongoSessionsAvailable\(\)\) \{/,
+    'the database session store must be the branch that runs when a database is connected');
+  assert.match(source, /const mongoBacked = mongoSessionsAvailable\(\);/,
+    'what the dashboard reports must be read live, not cached');
+
+  // And the fallback must still exist, so a deployment with no database still works.
+  assert.match(source, /useMultiFileAuthState\(authDirectory\)/,
+    'the file store must remain as a fallback when there is no database');
+});
+
+test('the two WhatsApp session warnings cannot contradict each other', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  // Sessions are stored in the database, so the status endpoint must be able to
+  // report that. If it still cannot, the storage it describes is not the storage in
+  // use, and a doctor is sent to fix a problem they do not have.
+  const store = fs.readFileSync(path.join(__dirname, '..', 'src', 'whatsappAuthStore.js'), 'utf8');
+  assert.match(store, /createMongoAuthState/,
+    'the database backed session store must exist and be exported');
+});

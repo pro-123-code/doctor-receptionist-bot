@@ -1276,7 +1276,15 @@ function findPersistentDiskRoot() {
 // Kept here rather than only in getBaileysSessionInfo so the readiness panel and
 // the startup log agree with what the workers actually use.
 let whatsappAuthMode = null;
-const useMongoSessions = mongoose.connection.readyState === 1;
+
+// Read at the moment it is needed, never at load. This was a constant evaluated
+// while this file was being required, which is always before the database has
+// connected, so it was permanently false and the database session store was
+// unreachable. Every clinic therefore kept sessions on files that a deploy wipes,
+// and was told to mount a disk that could not have helped.
+function mongoSessionsAvailable() {
+  return mongoose.connection.readyState === 1;
+}
 
 async function clearWhatsAppAuthDirectory(authDirectory) {
   try {
@@ -1319,7 +1327,7 @@ function isWritableDirectory(targetPath) {
 function getBaileysSessionInfo() {
   const { root, persistent, source, diskRoot } = getBaileysAuthRoot();
   const writable = isWritableDirectory(root);
-  const mongoBacked = useMongoSessions;
+  const mongoBacked = mongoSessionsAvailable();
   return {
     authDirectory: root,
     // MongoDB holds the session, so a wiped filesystem no longer forces a rescan.
@@ -1387,7 +1395,7 @@ async function startDoctorWhatsApp(doctorProfile) {
     // filesystem, so a clinic stops having to rescan its QR code every release.
     // The file store stays as a fallback for a deployment with no database.
     let authState;
-    if (useMongoSessions) {
+    if (mongoSessionsAvailable()) {
       authState = createMongoAuthState(targetDoctorId);
       const existingCreds = await authState.state.creds.get();
       whatsappAuthMode = existingCreds ? 'mongodb' : 'mongodb-empty';

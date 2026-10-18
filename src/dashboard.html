@@ -1205,8 +1205,12 @@ function asArray(value) {
       emptyState.hidden = total > 0;
       if (statToday) statToday.textContent = String(total);
       if (statTodayLabel) statTodayLabel.textContent = `booked in ${spanLabel}`;
+      // dateStyle cannot be combined with weekday, day, month or year: the
+      // specification forbids mixing the two styles and the runtime throws
+      // "Invalid option" for it. The weekday is wanted in the group separator, so
+      // the individual parts are named instead.
       const dayFormatter = new Intl.DateTimeFormat(undefined, {
-        weekday: 'long', dateStyle: 'medium', timeZone: data.timeZone
+        weekday: 'long', day: 'numeric', month: 'short', year: 'numeric', timeZone: data.timeZone
       });
       const slotStartFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: 'short', timeZone: data.timeZone });
       const slotEndFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: 'short', timeZone: data.timeZone });
