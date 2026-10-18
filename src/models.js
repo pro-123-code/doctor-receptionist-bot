@@ -67,6 +67,12 @@ appointmentSchema.index({ doctorId: 1, slotKey: 1 }, { unique: true });
 // Twenty four hours, as a plain number of seconds. This was the arithmetic
 // expression 60 * 60 * 24 * 30, which Mongo cannot use as a TTL value, so the
 // index never expired anything and the collection grew without bound.
+//
+// Fixing that exposed a second problem: the database already held this index under
+// the name createdAt_1 with the old thirty day value, and Mongo refuses to redefine
+// an index in place with different options. Automatic creation therefore failed on
+// connect and the process exited. This index is managed explicitly on startup
+// instead, where the stale one is dropped before the new one is built.
 const SERVICE_LOG_TTL_SECONDS = 24 * 60 * 60;
 
 const serviceLogSchema = new Schema({
@@ -198,14 +204,52 @@ const auditLogSchema = new Schema({
 // Every action is recorded, and the record is never edited or removed.
 auditLogSchema.index({ createdAt: -1 });
 const AuditLog = mongoose.models.AuditLog || mongoose.model('AuditLog', auditLogSchema);
-const Appointment = mongoose.models.Appointment || mongoose.model('Appointment', appointmentSchema);
+
+// This index is handled by reconcileServiceLogIndexes on startup rather than
+// automatically. Creating it automatically would meet the stale definition already
+// in the database and abort the connection before the app could repair it.
+serviceLogSchema.set('autoIndex', false);
 const ServiceLog = mongoose.models.ServiceLog || mongoose.model('ServiceLog', serviceLogSchema);
+
+const Appointment = mongoose.models.Appointment || mongoose.model('Appointment', appointmentSchema);
 const DashboardLoginAttempt = mongoose.models.DashboardLoginAttempt || mongoose.model('DashboardLoginAttempt', dashboardLoginAttemptSchema);
 const DailyReportRun = mongoose.models.DailyReportRun || mongoose.model('DailyReportRun', dailyReportRunSchema);
 const InboundMessage = mongoose.models.InboundMessage || mongoose.model('InboundMessage', inboundMessageSchema);
 const InboundQueueLock = mongoose.models.InboundQueueLock || mongoose.model('InboundQueueLock', inboundQueueLockSchema);
 const Doctor = mongoose.models.Doctor || mongoose.model('Doctor', doctorSchema);
 const DashboardUser = mongoose.models.DashboardUser || mongoose.model('DashboardUser', dashboardUserSchema);
+
+// Brings the operational log indexes in line with the schema. Any existing TTL on
+// createdAt whose retention differs from the schema is dropped first, because
+// MongoDB cannot redefine an index in place with different options, and doing so
+// failed the connection. syncIndexes is not enough on its own: it leaves an index
+// alone when the name still matches, which is exactly the conflicting case.
+//
+// Index maintenance must never stop the service from starting, so a failure here is
+// reported and the app continues, keeping whatever retention it already had.
+async function reconcileServiceLogIndexes(logger = console) {
+  try {
+    const collection = ServiceLog.collection;
+    const existing = await collection.indexes().catch((error) => {
+      if (error.code === 26 || error.codeName === 'NamespaceNotFound') return [];
+      throw error;
+    });
+    for (const index of existing) {
+      if (typeof index.expireAfterSeconds !== 'number') continue;
+      if (index.expireAfterSeconds === SERVICE_LOG_TTL_SECONDS) continue;
+      await collection.dropIndex(index.name).catch((error) => {
+        if (error.code !== 27 && error.codeName !== 'IndexNotFound') throw error;
+      });
+      logger.log(`Operational log index ${index.name} refreshed from `
+        + `${index.expireAfterSeconds}s to ${SERVICE_LOG_TTL_SECONDS}s retention`);
+    }
+    await ServiceLog.createIndexes();
+    return { ok: true };
+  } catch (error) {
+    logger.warn(`Operational log index update deferred (${error?.name || 'Error'})`);
+    return { ok: false, error };
+  }
+}
 
 async function connectDatabase(uri, clinicId, doctorId = clinicId) {
   if (!uri) throw new Error('Missing MongoDB configuration: MONGODB_URI');
@@ -221,6 +265,9 @@ async function connectDatabase(uri, clinicId, doctorId = clinicId) {
     serverSelectionTimeoutMS: 10000,
     maxPoolSize: 10
   });
+  // Runs before any logging so the retention index matches the schema and the
+  // previous thirty day definition does not keep blocking the connection.
+  await reconcileServiceLogIndexes();
   await Doctor.collection.updateMany(
     { $or: [
       { doctorName: { $exists: false } },
@@ -452,6 +499,7 @@ module.exports = {
   Appointment,
   AuditLog,
   Conversation,
+  reconcileServiceLogIndexes,
   DailyReportRun,
   InboundMessage,
   InboundQueueLock,

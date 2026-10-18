@@ -4398,3 +4398,98 @@ test('a failed reschedule leaves the original appointment alone', async () => {
   assert.match(serverSource, /\$unset: \{ cancelledAt: 1, cancelledBy: 1 \}/,
     'a moved appointment must not keep a cancellation stamp');
 });
+test('a stale retention index is replaced instead of blocking startup', async () => {
+  const { reconcileServiceLogIndexes } = require('../src/models');
+  const ServiceLog = mongoose.models.ServiceLog;
+
+  // Reproduces the production failure: the database already holds createdAt_1 with
+  // the old thirty day retention, and Mongo refuses to redefine an index in place
+  // with different options, which exited the process on connect.
+  const existing = [{ name: 'createdAt_1', key: { createdAt: 1 }, expireAfterSeconds: 2592000 }];
+  const dropped = [];
+  const created = [];
+  let indexesShouldThrow = true;
+
+  const collection = ServiceLog.collection;
+  const originalCollection = ServiceLog.collection;
+  ServiceLog.collection = {
+    async indexes() { return existing.map((index) => ({ ...index })); },
+    async dropIndex(name) { dropped.push(name); }
+  };
+  const originalCreateIndexes = ServiceLog.createIndexes;
+  ServiceLog.createIndexes = async () => {
+    if (indexesShouldThrow) throw new Error('IndexOptionsConflict');
+    created.push(true);
+  };
+
+  try {
+    // The conflicting index must be dropped, otherwise createIndexes fails again.
+    const result = await reconcileServiceLogIndexes({ log() {}, warn() {} });
+    assert.deepEqual(dropped, ['createdAt_1'], 'the stale retention index must be dropped by name');
+    assert.equal(result.ok, false, 'a create failure is reported rather than thrown');
+
+    // With the stale index gone the rebuild succeeds.
+    indexesShouldThrow = false;
+    const rebuilt = await reconcileServiceLogIndexes({ log() {}, warn() {} });
+    assert.equal(rebuilt.ok, true);
+    assert.deepEqual(created, [true], 'the correct index must then be built');
+  } finally {
+    ServiceLog.createIndexes = originalCreateIndexes;
+    if (originalCollection) ServiceLog.collection = originalCollection;
+  }
+});
+
+test('an index that already matches is left alone', async () => {
+  const { reconcileServiceLogIndexes } = require('../src/models');
+  const ServiceLog = mongoose.models.ServiceLog;
+  const dropped = [];
+  const originalCollection = ServiceLog.collection;
+  const originalCreateIndexes = ServiceLog.createIndexes;
+  ServiceLog.collection = {
+    async indexes() {
+      return [
+        { name: 'createdAt_1', key: { createdAt: 1 }, expireAfterSeconds: 86400 },
+        { name: 'doctorId_1', key: { doctorId: 1 } },
+        { name: '_id_', key: { _id: 1 } }
+      ];
+    },
+    async dropIndex(name) { dropped.push(name); }
+  };
+  ServiceLog.createIndexes = async () => {};
+
+  try {
+    const result = await reconcileServiceLogIndexes({ log() {}, warn() {} });
+    assert.equal(result.ok, true);
+    assert.deepEqual(dropped, [],
+      'a matching index must not be dropped, and a non TTL index must not be touched');
+  } finally {
+    ServiceLog.createIndexes = originalCreateIndexes;
+    if (originalCollection) ServiceLog.collection = originalCollection;
+  }
+});
+
+test('index maintenance can never stop the service from starting', async () => {
+  const { reconcileServiceLogIndexes } = require('../src/models');
+  const ServiceLog = mongoose.models.ServiceLog;
+  const originalCollection = ServiceLog.collection;
+  ServiceLog.collection = {
+    async indexes() { throw new Error('not authorised to list indexes'); }
+  };
+
+  try {
+    // The database rejects index work, for example on a restricted role. The app
+    // must still boot and run, it just keeps the retention it already had.
+    const result = await reconcileServiceLogIndexes({ log() {}, warn() {} });
+    assert.equal(result.ok, false);
+    assert.ok(result.error, 'the reason must be reported');
+  } finally {
+    if (originalCollection) ServiceLog.collection = originalCollection;
+  }
+});
+
+test('the operational log index is never created automatically on connect', () => {
+  const ServiceLog = mongoose.models.ServiceLog;
+  assert.equal(ServiceLog.schema.options.autoIndex, false,
+    'automatic creation would hit the conflicting index and abort the connection');
+  assert.equal(ServiceLog.schema.path('createdAt').options.expires, 86400);
+});
