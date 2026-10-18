@@ -112,7 +112,16 @@ function createHarness() {
     '#admin-appointments': createElement(),
     '#admin-system-body': createElement(),
     '#admin-logs': createElement(),
-    '#facility-pricing': createElement()
+    '#facility-pricing': createElement(),
+    // The appointments table. The harness never stubbed this endpoint, so this view
+    // was the one part of the dashboard never actually executed: the day formatter
+    // threw before the first row was drawn and the table stayed permanently empty,
+    // with search, reschedule, cancel and export all unreachable behind it.
+    '#appointments': createElement('tbody'),
+    '#empty-state': createElement(),
+    '#result-count': createElement(),
+    '#stat-today': createElement(),
+    '#stat-today-label': createElement()
   };
   const document = {
     title: '',
@@ -155,6 +164,33 @@ function createHarness() {
       religiousHolidayOpenDays: [], religiousHolidays: [],
       welcomeMessage: 'Assalam-o-Alaikum! Welcome to our clinic', setupComplete: false,
       appointmentLookaheadDays: 14, reportTime: '07:30'
+    },
+    // A real appointment list, with the shape the server actually sends.
+    '/api/dashboard/appointments': {
+      date: '2026-10-07', from: '2026-10-07', to: '2026-10-07', grouped: false,
+      search: '', timeZone: 'Asia/Karachi',
+      appointments: [
+        {
+          id: 'apt-1', patientName: 'Ada', whatsAppNumber: '+923001234567',
+          symptoms: 'Fever and cough', slotStart: '2026-10-08T05:00:00.000Z',
+          slotEnd: '2026-10-08T05:15:00.000Z', bookedAt: '2026-10-07T05:00:00.000Z',
+          status: 'booked'
+        },
+        {
+          id: 'apt-2', patientName: 'Bilal', whatsAppNumber: '+923009876543',
+          symptoms: 'Follow up', slotStart: '2026-10-08T06:00:00.000Z',
+          slotEnd: '2026-10-08T06:15:00.000Z', bookedAt: '2026-10-07T06:00:00.000Z',
+          status: 'booked'
+        }
+      ]
+    },
+    '/api/dashboard/whatsapp/status': {
+      status: 'connected', qrDataUrl: null, sessionPersistent: true, sessionNotice: null
+    },
+    '/api/dashboard/calendar/status': {
+      connected: true, verified: true, calendarId: 'primary', calendarIdEditable: false,
+      verificationCode: null, verificationMessage: null, oauthAvailable: true,
+      oauthError: null, redirectUri: 'https://example.test/api/auth/google/callback'
     },
     '/api/admin/overview': {
       generatedAt: '2026-10-07T00:00:00.000Z',
@@ -440,6 +476,61 @@ async function main() {
   if (!doctor.requested.includes('/api/dashboard/settings')) {
     failures.push('doctor session never loaded its clinic settings');
   }
+
+  // The reported symptom: the appointments table stayed empty while a red banner read
+  // "Invalid option : option". The cause was a day formatter asking for a weekday and
+  // a date style together, which the runtime rejects, raised before the first row was
+  // drawn. Every action a doctor has lives inside these rows, so an empty table means
+  // a doctor cannot search, reschedule or cancel anyone.
+  const appointmentView = await renderAs(doctorSession);
+  // Driven directly rather than through login: loading it that way is gated behind a
+  // completed clinic setup, and the stub is deliberately an incomplete clinic so the
+  // setup form path can be tested. The table itself must work for a clinic that has
+  // finished setup, which is every real one.
+  await appointmentView.context.loadAppointments().catch((error) => {
+    failures.push(`loading appointments threw -> ${error.message}`);
+  });
+  const table = appointmentView.document.querySelector('#appointments');
+  const renderedRows = table.children.filter((row) => row.children.some((cell) => cell.textContent));
+  if (renderedRows.length === 0) {
+    failures.push('the appointments table rendered no rows, so no patient is reachable '
+      + `-> banner said "${appointmentView.document.querySelector('#notice').textContent}"`);
+  } else {
+    if (renderedRows.length !== 2) {
+      failures.push(`expected 2 appointment rows, rendered ${renderedRows.length}`);
+    }
+    const first = renderedRows[0];
+    const cellText = first.children.map((cell) => cell.textContent);
+    if (!cellText.some((text) => text.includes('Ada'))) {
+      failures.push(`the first appointment row does not name the patient -> ${JSON.stringify(cellText)}`);
+    }
+    if (!cellText.some((text) => /\+923001234567/.test(text))) {
+      failures.push('the row does not show the WhatsApp number');
+    }
+    if (!cellText.some((text) => text.includes('Fever and cough'))) {
+      failures.push('the row does not show the symptoms');
+    }
+    // The time is what proves a formatter actually ran rather than being skipped.
+    if (!cellText.some((text) => /\d{1,2}:\d{2}/.test(text))) {
+      failures.push(`the row shows no appointment time -> ${JSON.stringify(cellText)}`);
+    }
+    // Reschedule and cancel hang off the row, so an empty table hides both.
+    const actionLabels = first.children
+      .flatMap((cell) => cell.children)
+      .filter((child) => child.tagName === 'BUTTON')
+      .map((button) => button.textContent);
+    if (!actionLabels.includes('Reschedule')) {
+      failures.push(`the row offers no reschedule action -> ${JSON.stringify(actionLabels)}`);
+    }
+    if (!actionLabels.includes('Cancel')) {
+      failures.push(`the row offers no cancel action -> ${JSON.stringify(actionLabels)}`);
+    }
+    // And the banner must not be carrying an error the doctor cannot act on.
+    const viewNotice = appointmentView.document.querySelector('#notice');
+    if (viewNotice.textContent) {
+      failures.push(`loading appointments raised an error banner -> ${viewNotice.textContent}`);
+    }
+  }
   if (doctor.requested.some((url) => url.startsWith('/api/admin/'))) {
     failures.push(`doctor session requested an admin endpoint -> ${doctor.requested.filter((url) => url.startsWith('/api/admin/')).join(', ')}`);
   }
@@ -534,6 +625,7 @@ async function main() {
   }
 
   console.log(`dashboard-runtime: clinic setup save payload verified, `
+    + `appointments rendered with patient, time and reschedule and cancel actions, `
     + `doctor, superadmin and role-less sessions rendered, `
     + `${sweep.swept} functions swept for scope errors`);
 }

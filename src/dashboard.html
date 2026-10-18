@@ -11,29 +11,12 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            brand: {
-              50: '#F0FDFA', 100: '#CCFBF1', 200: '#99F6E4', 300: '#5EEAD4',
-              400: '#2DD4BF', 500: '#14B8A6', 600: '#0D9488', 700: '#0F766E',
-              800: '#115E59', 900: '#134E4A', 950: '#042F2E'
-            },
-            ink: { DEFAULT: '#1E293B', soft: '#64748B', faint: '#94A3B8' }
-          },
-          fontFamily: { sans: ['"Plus Jakarta Sans"', 'ui-sans-serif', 'system-ui', 'sans-serif'] },
-          boxShadow: {
-            card: '0 1px 2px 0 rgb(15 23 42 / 0.04), 0 1px 3px 0 rgb(15 23 42 / 0.06)',
-            lift: '0 10px 30px -12px rgb(15 23 42 / 0.25)'
-          },
-          borderRadius: { xl: '0.875rem', '2xl': '1.125rem' }
-        }
-      }
-    };
-  </script>
+  <!-- The stylesheet is compiled at build time by `npm run build:dashboard`. It used to
+       be loaded from the browser version of the framework, which shipped a compiler to
+       every doctor, rebuilt the styles on each visit and flashed an unstyled page while
+       it worked. On a slow connection that flash was the difference between the
+       dashboard looking ready and looking broken. -->
+  <link rel="stylesheet" href="/dashboard-built.css">
   <style>
     [hidden] { display: none !important; }
     body { background: #F8FAFC; color: #1E293B; }

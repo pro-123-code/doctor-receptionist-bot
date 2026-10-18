@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* The handful of rules the page needs beyond the utility classes. These were always
+   here, and they are kept as they were so the built stylesheet is not a redesign. */
+[hidden] { display: none !important; }
+body { background: #F8FAFC; color: #1E293B; }
+.surface { background: #fff; border: 1px solid #E2E8F0; border-radius: 1rem; box-shadow: 0 1px 2px 0 rgb(15 23 42 / 0.04); }
+.field { width: 100%; border: 1px solid #CBD5E1; border-radius: .75rem; padding: .55rem .75rem; font-size: .925rem; background: #fff; transition: border-color .15s, box-shadow .15s; }

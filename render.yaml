@@ -1,0 +1,32 @@
+# Render blueprint. This file is the deployable description of the service, so the
+# runtime, the health check and the build step are declared once here instead of being
+# set by hand in the dashboard where they drift out of step with the repository.
+services:
+  - type: web
+    name: doctor-receptionist-bot
+    runtime: node
+    plan: free
+    # The same version the tests run against. Render would otherwise take the newest
+    # available Node, which is how a deployment ends up running a runtime that no
+    # test has ever passed on.
+    nodeVersion: 20.19.0
+    buildCommand: npm ci --omit=dev && npm run build:dashboard
+    startCommand: npm start
+    healthCheckPath: /health
+    # The free instance is put to sleep after inactivity and takes roughly fifty
+    # seconds to wake. A patient messaging after hours waits that long on the first
+    # message unless something is pinging the service, so the auto deploy is kept but
+    # a scheduler should poll /health every few minutes. See README for the free
+    # monitor that does this.
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20.19.0
+      # Trust the proxy Render puts in front of the app, so the rate limiter sees the
+      # real client address and the OAuth redirect is built from the public host.
+      - key: TRUST_PROXY
+        value: "true"
+      # Every other variable is a secret and is set in the dashboard, never here:
+      # MONGODB_URI, GEMINI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+      # SMTP_HOST, SMTP_USER, SMTP_PASS, EMAIL_FROM, DOCTOR_ID, CLINIC_ID,
+      # DOCTOR_NAME, CLINIC_NAME, and the superadmin credentials.

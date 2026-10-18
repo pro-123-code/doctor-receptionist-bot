@@ -2,7 +2,7 @@
   "name": "doctor-receptionist-bot",
   "version": "0.1.0",
   "private": true,
-  "description": "WhatsApp receptionist webhook for a doctor's practice",
+  "description": "A WhatsApp receptionist for private clinics, with a per-clinic web dashboard.",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -12,7 +12,12 @@
     "dashboard:check": "node test/dashboard-contract.js",
     "dashboard:runtime": "node test/dashboard-runtime.js",
     "verify:deploy": "node scripts/verify-deployment.js",
-    "test": "node --test"
+    "test": "node --test",
+    "build:dashboard": "tailwindcss -i ./src/dashboard.css -o ./src/dashboard-built.css --minify",
+    "dashboard:css": "node test/dashboard-css.js",
+    "self:check": "node scripts/self-check.js",
+    "audit": "npm audit --audit-level=high",
+    "verify": "npm run check && npm run smoke && npm run dashboard:check && npm run build:dashboard && npm run dashboard:css && npm run dashboard:runtime && npm test"
   },
   "engines": {
     "node": "^20.19.0"
@@ -34,5 +39,11 @@
   },
   "overrides": {
     "uuid": "^11.1.1"
-  }
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17"
+  },
+  "license": "UNLICENSED"
 }

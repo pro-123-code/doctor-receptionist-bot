@@ -19,14 +19,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Reads .nvmrc rather than repeating a number, so the version tested here, the
+      # version the app declares and the version a developer runs cannot drift apart.
+      # They already had: the app declares Node 20 while the machine that built the
+      # features ran Node 26, and the fault that shipped was an Intl behaviour
+      # difference between runtimes.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version-file: '.nvmrc'
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      # Reports rather than blocks. The WhatsApp library carries advisories that are
+      # not exploitable in this usage, so failing the build on them would train
+      # everyone to ignore a red build. The point is that the list is read every push.
+      - name: Audit dependencies
+        run: npm audit --audit-level=high || echo "::warning::npm audit reported advisories (see output above)"
 
       - name: Syntax check
         run: npm run check
@@ -39,6 +50,14 @@ jobs:
 
       - name: Dashboard runtime check
         run: npm run dashboard:runtime
+
+      # The stylesheet is compiled at build time, so a change to the page can leave it
+      # stale or empty while every other check still passes. Render would then serve a
+      # completely unstyled dashboard. This rebuilds it and checks it against the page.
+      - name: Build and verify dashboard stylesheet
+        run: |
+          npm run build:dashboard
+          npm run dashboard:css
 
       - name: Test suite
         run: npm test

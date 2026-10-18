@@ -142,6 +142,13 @@ function sendHtmlPage(response, html) {
 app.get('/privacy-policy', (_request, response) => sendHtmlPage(response, privacyPolicy()));
 app.get('/terms', (_request, response) => sendHtmlPage(response, termsOfService()));
 
+// The compiled stylesheet. Cached hard because it only changes when a build changes
+// it, and a doctor on a slow connection pays for it on every single visit.
+app.get('/dashboard-built.css', (_request, response) => {
+  response.set('Cache-Control', 'public, max-age=31536000, immutable');
+  response.type('text/css').sendFile(path.join(__dirname, 'dashboard-built.css'));
+});
+
 app.get('/dashboard.webmanifest', (_request, response) => {
   response.sendFile(path.join(__dirname, 'dashboard.webmanifest'));
 });
