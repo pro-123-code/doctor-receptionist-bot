@@ -29,6 +29,15 @@ const {
   paginateSlots: paginateSlotOffers
 } = require('./slotOffers');
 const { resolveClinicTiming, resolveEnvironmentTiming } = require('./clinicTiming');
+const {
+  RESCHEDULE_DATE_STEP,
+  RESCHEDULE_SELECTION_STEP,
+  canReschedule,
+  formatCancelledReply,
+  formatNoAppointmentReply,
+  formatRescheduleConfirmation,
+  wantsToChangeAppointment
+} = require('./appointmentReschedule');
 const { privacyPolicy, termsOfService } = require('./legalPages');
 
 const app = express();
@@ -609,6 +618,222 @@ async function saveCalendarRetry(sender, conversation, doctorId) {
   await saveConversation(sender, conversation, doctorId);
 }
 
+// --- Patient initiated rescheduling -------------------------------------------
+// Every step is scoped to the sender's own appointment, so one patient can never
+// see or move another. Any failure returns the patient to the booking flow with
+// their original appointment untouched.
+
+async function findPatientAppointment(sender, doctorId) {
+  return Appointment.findOne({ doctorId, senderJid: sender, status: 'booked' })
+    .sort({ slotStart: 1 })
+    .lean();
+}
+
+async function startRescheduleFlow(sender, conversation, doctorProfile) {
+  const targetDoctorId = doctorProfile.doctorId;
+  const appointment = await findPatientAppointment(sender, targetDoctorId);
+
+  // Nothing booked, or nothing left in the future to move.
+  if (!canReschedule(appointment)) {
+    await deleteConversation(sender, targetDoctorId);
+    return formatNoAppointmentReply();
+  }
+
+  conversation.step = RESCHEDULE_DATE_STEP;
+  conversation.rescheduleAppointmentId = String(appointment._id);
+  conversation.details = { name: appointment.details.name };
+  conversation.rescheduleCurrentStart = new Date(appointment.slotStart).toISOString();
+  conversation.updatedAt = Date.now();
+  await saveConversation(sender, conversation, targetDoctorId);
+
+  return `${formatRescheduleConfirmation(appointment, timeZone)}\n`
+    + 'Nayi tareekh bhejein, jaise kal ya next Friday, ya "cancel" likh kar appointment cancel karein.';
+}
+
+async function handleRescheduleDateSelection(sender, conversation, message, doctorProfile) {
+  const targetDoctorId = doctorProfile.doctorId;
+  const appointmentId = conversation.rescheduleAppointmentId;
+  const appointment = appointmentId
+    ? await Appointment.findOne({ _id: appointmentId, doctorId: targetDoctorId, senderJid: sender }).lean()
+    : null;
+
+  if (!appointment) {
+    await deleteConversation(sender, targetDoctorId);
+    return formatNoAppointmentReply();
+  }
+
+  // Cancelling out of the reschedule flow is a complete, immediate cancellation.
+  if (/^\s*(cancel|nahi|no|nakko)\s*$/i.test(message)) {
+    await cancelPatientAppointment(sender, conversation, appointment, doctorProfile);
+    return formatCancelledReply(new Intl.DateTimeFormat('en-GB', {
+      timeZone, dateStyle: 'full', timeStyle: 'short'
+    }).format(new Date(appointment.slotStart)));
+  }
+
+  if (!canReschedule(appointment)) {
+    await deleteConversation(sender, targetDoctorId);
+    return 'Aap ki appointment ab nahi badal sakti, kyunke us waqt guzar chuka hai ya wo cancel ho chuki hai. '
+      + 'Nayi book karna ho to "appointment" likh kar bhejein.';
+  }
+
+  if (message.length > maxInputLength) {
+    return `Meherbani karke ${maxInputLength} characters se chhoti tareekh bhejein.`;
+  }
+  const lookahead = resolveClinicTiming(doctorProfile).appointmentLookaheadDays;
+  const requestedDate = parseRequestedDate(message, timeZone, lookahead);
+  if (!requestedDate) {
+    return `Maazrat, tareekh samajh nahi aayi. Aaj se agle ${lookahead} din ke andar koi tareekh batayein, misal: kal ya next Friday.`;
+  }
+  if (!isClinicOpenOnDate(
+    `${requestedDate.year}-${String(requestedDate.month).padStart(2, '0')}-${String(requestedDate.day).padStart(2, '0')}`,
+    doctorProfile
+  )) {
+    return getClinicClosedReply(requestedDate, doctorProfile);
+  }
+
+  const dateKey = `${requestedDate.year}-${String(requestedDate.month).padStart(2, '0')}-${String(requestedDate.day).padStart(2, '0')}`;
+  let availableSlots;
+  try {
+    availableSlots = await findAvailableSlots(dateKey, doctorProfile);
+  } catch (error) {
+    logServiceError('Calendar availability', error, [], targetDoctorId, 'warn');
+    return 'Maazrat, waqt check karne mein mushkil aa rahi hai. Meherbani karke thori dair baad dobara reply karein.';
+  }
+  if (!availableSlots.length) {
+    return 'Maazrat, us tareekh ko koi waqt dastiyab nahi. Meherbani karke doosri tareekh batayein.';
+  }
+
+  const page = paginateSlots(availableSlots, 0);
+  if (!page.slots.length) {
+    return 'Maazrat, is tareekh ko abhi koi waqt dastiyab nahi. Meherbani karke doosri tareekh batayein.';
+  }
+  conversation.step = RESCHEDULE_SELECTION_STEP;
+  conversation.requestedDate = dateKey;
+  conversation.slots = page.slots;
+  conversation.slotPage = page.nextOffset;
+  conversation.moreSlotsAvailable = page.moreAvailable;
+  conversation.updatedAt = Date.now();
+  await saveConversation(sender, conversation, targetDoctorId);
+  return formatSlotOffer(page.slots, page.moreAvailable, 'Nayi appointment ke liye in auqaat mein se ek muntakhib karein:');
+}
+
+async function handleRescheduleSlotSelection(sender, conversation, message, doctorProfile) {
+  const targetDoctorId = doctorProfile.doctorId;
+  const appointmentId = conversation.rescheduleAppointmentId;
+  const appointment = appointmentId
+    ? await Appointment.findOne({ _id: appointmentId, doctorId: targetDoctorId, senderJid: sender }).lean()
+    : null;
+  if (!appointment) {
+    await deleteConversation(sender, targetDoctorId);
+    return formatNoAppointmentReply();
+  }
+  if (!canReschedule(appointment)) {
+    await deleteConversation(sender, targetDoctorId);
+    return 'Yeh appointment ab nahi badal sakti. Nayi book karna ho to "appointment" likh kar bhejein.';
+  }
+
+  const wantsMore = isMoreSlotRequest(message) && conversation.moreSlotsAvailable;
+  if (!conversation.slots?.length || wantsMore) {
+    conversation.step = RESCHEDULE_DATE_STEP;
+    await saveConversation(sender, conversation, targetDoctorId);
+    return 'Meherbani karke nayi tareekh bhejein.';
+  }
+
+  let selectedSlotNumber = /^\d+$/.test(message) ? Number(message) : null;
+  if (selectedSlotNumber === null) {
+    try {
+      selectedSlotNumber = await extractSlotNumber(message, conversation.slots, formatSlot, doctorProfile);
+    } catch (error) {
+      logServiceError('Gemini appointment selection', error, [], targetDoctorId, 'warn');
+    }
+  }
+  const selectedSlot = conversation.slots?.[selectedSlotNumber - 1];
+  if (!selectedSlot) {
+    return 'Meherbani karke upar diye gaye auqaat mein se ek muntakhib karein.';
+  }
+
+  const previousStart = new Date(appointment.slotStart);
+  const newStart = new Date(selectedSlot.start);
+  const newEnd = new Date(selectedSlot.end);
+  if (Number.isNaN(newStart.getTime()) || newStart.getTime() <= Date.now()) {
+    return 'Yeh waqt guzar chuka hai. Meherbani karke doosra waqt muntakhib karein.';
+  }
+  if (newStart.getTime() === previousStart.getTime()) {
+    await deleteConversation(sender, targetDoctorId);
+    return 'Wohi waqt chuna gaya hai aur aap ki appointment waisi hi hai.';
+  }
+
+  // Check the new slot is still free before touching the old booking, so a clash
+  // cannot cost the patient the appointment they already had.
+  const clash = await Appointment.exists({
+    doctorId: targetDoctorId, status: 'booked', slotStart: newStart, _id: { $ne: appointment._id }
+  });
+  if (clash) {
+    conversation.step = RESCHEDULE_DATE_STEP;
+    await saveConversation(sender, conversation, targetDoctorId);
+    return 'Maazrat, woh waqt abhi kisi aur ne le liya hai. Meherbani karke doosri tareekh batayein.';
+  }
+
+  const moved = await Appointment.findOneAndUpdate(
+    { _id: appointment._id, doctorId: targetDoctorId, senderJid: sender, status: 'booked' },
+    {
+      $set: {
+        slotStart: newStart,
+        slotEnd: newEnd,
+        slotKey: conversation.requestedDate
+          ? `${conversation.requestedDate}T${String(getLocalDateParts(newStart, timeZone).hour).padStart(2, '0')}:${String(getLocalDateParts(newStart, timeZone).minute).padStart(2, '0')}`
+          : appointment.slotKey
+      },
+      $unset: { cancelledAt: 1, cancelledBy: 1 }
+    },
+    { new: true, runValidators: true }
+  ).lean();
+
+  if (!moved) {
+    await deleteConversation(sender, targetDoctorId);
+    return 'Maazrat, appointment update nahi ho saki. Meherbani karke "appointment" likh kar nayi book kar lein.';
+  }
+
+  // Keep the calendar in step, but never undo a move the patient already confirmed.
+  if (moved.calendarEventId) {
+    try {
+      const client = await createCalendarApiClient(doctorProfile);
+      if (client) {
+        await client.events.update({
+          calendarId: moved.calendarEventId,
+          eventId: moved.calendarEventId,
+          requestBody: { start: { dateTime: newStart.toISOString() }, end: { dateTime: newEnd.toISOString() } }
+        });
+      }
+    } catch (error) {
+      logServiceError('Calendar reschedule', error, [], targetDoctorId, 'warn');
+    }
+  }
+
+  await deleteConversation(sender, targetDoctorId);
+  return 'Aap ki appointment change ho gayi hai. Nayi waqt '
+    + `${formatSlot(newStart, 0)} hai. Shukriya!`;
+}
+
+async function cancelPatientAppointment(sender, conversation, appointment, doctorProfile) {
+  const targetDoctorId = doctorProfile.doctorId;
+  await Appointment.updateOne(
+    { _id: appointment._id, doctorId: targetDoctorId, senderJid: sender },
+    { $set: { status: 'cancelled', cancelledAt: new Date(), cancelledBy: sender } }
+  );
+  if (appointment.calendarEventId) {
+    try {
+      const client = await createCalendarApiClient(doctorProfile);
+      if (client) {
+        await client.events.delete({ calendarId: appointment.calendarEventId, eventId: appointment.calendarEventId });
+      }
+    } catch (error) {
+      logServiceError('Calendar cancellation', error, [], targetDoctorId, 'warn');
+    }
+  }
+  await deleteConversation(sender, targetDoctorId);
+}
+
 async function handleConversationMessage(sender, message, doctorProfile) {
   const normalizedMessage = message.trim();
   doctorProfile = await Doctor.findOne({ doctorId: doctorProfile.doctorId, isActive: true })
@@ -654,6 +879,18 @@ async function handleConversationMessage(sender, message, doctorProfile) {
       : '';
     const checkupFee = formatRupees(doctorProfile.basicCheckupFee) || 'price ke liye rabta karein';
     return `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein yeh sahuliyaat mojood hain: ${facilities}. Basic checkup fee ${checkupFee}.${services}${consultation}`;
+  }
+
+  if (conversation.step === RESCHEDULE_SELECTION_STEP) {
+    return handleRescheduleSlotSelection(sender, conversation, normalizedMessage, doctorProfile);
+  }
+
+  if (conversation.step === RESCHEDULE_DATE_STEP) {
+    return handleRescheduleDateSelection(sender, conversation, normalizedMessage, doctorProfile);
+  }
+
+  if (wantsToChangeAppointment(normalizedMessage)) {
+    return startRescheduleFlow(sender, conversation, doctorProfile);
   }
 
   if (conversation.step === 'calendarSelection') {

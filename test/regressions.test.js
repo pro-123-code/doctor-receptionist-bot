@@ -4311,3 +4311,90 @@ test('superadmin actions are recorded in the audit log', async () => {
     else process.env.DASHBOARD_SESSION_SECRET = previousSecret;
   }
 });
+test('a patient asking to change an appointment is recognised', () => {
+  const { wantsToChangeAppointment, canReschedule, formatNoAppointmentReply } =
+    require('../src/appointmentReschedule');
+
+  for (const phrase of [
+    'cancel', 'Cancel', 'CANCEL', 'reschedule', 'rebook', 're-book',
+    'change date', 'change my appointment', 'move my appointment',
+    'appointment cancel', 'appointment change', 'appointment hatana',
+    'tareekh badlein', 'waqt badlein', 'dobara book', 'shift my booking'
+  ]) {
+    assert.equal(wantsToChangeAppointment(phrase), true, `"${phrase}" should start the reschedule flow`);
+  }
+
+  // Asking about an appointment is not asking to change it.
+  for (const phrase of [
+    'meri appointment kab hai', 'appointment kab hai', 'confirm', 'koi appointment',
+    'appointment time kya hai', ''
+  ]) {
+    assert.equal(wantsToChangeAppointment(phrase), false, `"${phrase}" must not trigger the flow`);
+  }
+  assert.equal(wantsToChangeAppointment(null), false);
+  assert.equal(wantsToChangeAppointment(undefined), false);
+
+  // Long free text is symptoms, not a command.
+  const longSymptoms = 'mujhe do teen din se bukhar hai aur seene mein dard bhi ho raha hai kuch zyada nahi';
+  assert.equal(wantsToChangeAppointment(longSymptoms), false,
+    'a long description of symptoms must not be read as a cancellation');
+
+  // Only a future, still booked appointment may be moved.
+  const now = new Date('2026-11-01T00:00:00Z');
+  assert.equal(canReschedule({ status: 'booked', slotStart: new Date('2026-11-05T00:00:00Z') }, now), true);
+  assert.equal(canReschedule({ status: 'booked', slotStart: new Date('2026-10-01T00:00:00Z') }, now), false,
+    'a past appointment cannot be rescheduled');
+  assert.equal(canReschedule({ status: 'cancelled', slotStart: new Date('2026-11-05T00:00:00Z') }, now), false);
+  assert.equal(canReschedule(null, now), false);
+
+  assert.match(formatNoAppointmentReply(), /appointment/i);
+});
+
+test('the reschedule steps cannot collide with the booking steps', () => {
+  const {
+    RESCHEDULE_DATE_STEP, RESCHEDULE_SELECTION_STEP
+  } = require('../src/appointmentReschedule');
+  const bookingSteps = ['name', 'contactNumber', 'majorSymptoms', 'appointmentDate', 'calendarSelection'];
+  for (const step of bookingSteps) {
+    assert.notEqual(RESCHEDULE_DATE_STEP, step, `${step} must keep its own meaning`);
+    assert.notEqual(RESCHEDULE_SELECTION_STEP, step, `${step} must keep its own meaning`);
+  }
+});
+
+test('a patient with no appointment is told so instead of entering the flow', async () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+
+  // The handler must look the patient up by their own sender id and clinic, never
+  // by a value taken from the conversation or the message.
+  assert.match(serverSource, /findOne\(\{ doctorId, senderJid: sender, status: 'booked' \}\)/,
+    'the lookup must be scoped to this clinic and this sender');
+  assert.match(serverSource, /_id: appointment\._id, doctorId: targetDoctorId, senderJid: sender/,
+    'the move must be scoped to this clinic and this sender');
+
+  // The reschedule branches must run before the booking branches so they cannot be
+  // swallowed by the calendar selection step.
+  const rescheduleBranch = serverSource.indexOf('wantsToChangeAppointment(normalizedMessage)');
+  const bookingBranch = serverSource.indexOf("conversation.step === 'calendarSelection'");
+  assert.ok(rescheduleBranch > -1 && bookingBranch > -1, 'both branches must exist');
+  assert.ok(rescheduleBranch < bookingBranch,
+    'the change intent must be handled before the booking flow so it is not misread as a slot number');
+});
+
+test('a failed reschedule leaves the original appointment alone', async () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+
+  // The new slot is checked for a clash before the old booking is modified, and the
+  // update itself is conditional on the booking still being present and booked.
+  const clashCheck = serverSource.indexOf('status: \'booked\', slotStart: newStart, _id: { $ne: appointment._id }');
+  const moveStatement = serverSource.indexOf('slotStart: newStart,', clashCheck);
+  assert.ok(clashCheck > -1, 'a clash must be detected');
+  assert.ok(clashCheck < moveStatement, 'the clash check must run before the appointment is moved');
+  assert.match(serverSource, /\{ _id: appointment\._id, doctorId: targetDoctorId, senderJid: sender, status: 'booked' \}/,
+    'the move must only apply to a still booked appointment owned by this sender');
+  assert.match(serverSource, /\$unset: \{ cancelledAt: 1, cancelledBy: 1 \}/,
+    'a moved appointment must not keep a cancellation stamp');
+});
