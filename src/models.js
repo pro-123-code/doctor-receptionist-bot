@@ -243,6 +243,11 @@ async function reconcileServiceLogIndexes(logger = console) {
       logger.log(`Operational log index ${index.name} refreshed from `
         + `${index.expireAfterSeconds}s to ${SERVICE_LOG_TTL_SECONDS}s retention`);
     }
+
+    // Every index is rebuilt, not only the retention one. Automatic creation is off for
+    // this schema, so nothing else would create them, and the retention value that
+    // broke this collection also stopped the clinic and doctor indexes being built.
+    // Nearly every log query filters by them.
     await ServiceLog.createIndexes();
     return { ok: true };
   } catch (error) {

@@ -4408,33 +4408,75 @@ test('a stale retention index is replaced instead of blocking startup', async ()
   const existing = [{ name: 'createdAt_1', key: { createdAt: 1 }, expireAfterSeconds: 2592000 }];
   const dropped = [];
   const created = [];
-  let indexesShouldThrow = true;
+  let createShouldThrow = true;
 
-  const collection = ServiceLog.collection;
   const originalCollection = ServiceLog.collection;
   ServiceLog.collection = {
     async indexes() { return existing.map((index) => ({ ...index })); },
-    async dropIndex(name) { dropped.push(name); }
-  };
-  const originalCreateIndexes = ServiceLog.createIndexes;
-  ServiceLog.createIndexes = async () => {
-    if (indexesShouldThrow) throw new Error('IndexOptionsConflict');
-    created.push(true);
+    async dropIndex(name) { dropped.push(name); },
+    async createIndex(fields, options) {
+      // MongoDB rejects an index that already exists under this name with different
+      // options, which is what killed the deploy.
+      if (createShouldThrow) throw new Error('IndexOptionsConflict');
+      created.push({ fields, options });
+      return options.name;
+    }
   };
 
   try {
-    // The conflicting index must be dropped, otherwise createIndexes fails again.
+    // The conflicting index must be dropped, otherwise creating it again fails.
     const result = await reconcileServiceLogIndexes({ log() {}, warn() {} });
     assert.deepEqual(dropped, ['createdAt_1'], 'the stale retention index must be dropped by name');
     assert.equal(result.ok, false, 'a create failure is reported rather than thrown');
 
     // With the stale index gone the rebuild succeeds.
-    indexesShouldThrow = false;
+    createShouldThrow = false;
     const rebuilt = await reconcileServiceLogIndexes({ log() {}, warn() {} });
     assert.equal(rebuilt.ok, true);
-    assert.deepEqual(created, [true], 'the correct index must then be built');
+
+    const retention = created.find((index) => index.options.expireAfterSeconds === 86400);
+    assert.ok(retention, 'the twenty four hour retention index must then be built');
+    assert.deepEqual(retention.fields, { createdAt: 1 });
   } finally {
-    ServiceLog.createIndexes = originalCreateIndexes;
+    if (originalCollection) ServiceLog.collection = originalCollection;
+  }
+});
+
+test('every operational log index is built, not only the retention one', async () => {
+  const { reconcileServiceLogIndexes } = require('../src/models');
+  const ServiceLog = mongoose.models.ServiceLog;
+  const created = [];
+  const originalCollection = ServiceLog.collection;
+
+  // Turning off automatic creation marks the whole schema as skip, including the
+  // clinic and doctor indexes. Those may be missing too, because the retention value
+  // that broke this collection also stopped the others being built, and nearly every
+  // log query filters by them. This is a plain collection with no indexes at all,
+  // which is the state a fresh or previously broken database is in.
+  ServiceLog.collection = {
+    async indexes() { return []; },
+    async dropIndex() {},
+    async createIndex(fields, options) { created.push({ fields, options }); }
+  };
+
+  try {
+    const result = await reconcileServiceLogIndexes({ log() {}, warn() {} });
+    assert.equal(result.ok, true);
+
+    const keys = created.map((index) => JSON.stringify(index.fields));
+    assert.ok(keys.includes(JSON.stringify({ createdAt: 1 })), 'the retention index must exist');
+    assert.ok(keys.includes(JSON.stringify({ doctorId: 1 })), 'the doctor index must exist');
+    assert.ok(keys.includes(JSON.stringify({ clinicId: 1 })), 'the clinic index must exist');
+
+    // The internal skip marker must not reach MongoDB, or it is not a real option.
+    for (const index of created) {
+      assert.equal(index.options._autoIndex, undefined,
+        'the internal skip marker must not be sent to MongoDB');
+    }
+    const retention = created.find((index) => index.fields.createdAt);
+    assert.equal(retention.options.expireAfterSeconds, 86400,
+      'retention must be twenty four hours, not thirty days');
+  } finally {
     if (originalCollection) ServiceLog.collection = originalCollection;
   }
 });
@@ -4444,7 +4486,6 @@ test('an index that already matches is left alone', async () => {
   const ServiceLog = mongoose.models.ServiceLog;
   const dropped = [];
   const originalCollection = ServiceLog.collection;
-  const originalCreateIndexes = ServiceLog.createIndexes;
   ServiceLog.collection = {
     async indexes() {
       return [
@@ -4453,9 +4494,9 @@ test('an index that already matches is left alone', async () => {
         { name: '_id_', key: { _id: 1 } }
       ];
     },
-    async dropIndex(name) { dropped.push(name); }
+    async dropIndex(name) { dropped.push(name); },
+    async createIndex() {}
   };
-  ServiceLog.createIndexes = async () => {};
 
   try {
     const result = await reconcileServiceLogIndexes({ log() {}, warn() {} });
@@ -4463,7 +4504,6 @@ test('an index that already matches is left alone', async () => {
     assert.deepEqual(dropped, [],
       'a matching index must not be dropped, and a non TTL index must not be touched');
   } finally {
-    ServiceLog.createIndexes = originalCreateIndexes;
     if (originalCollection) ServiceLog.collection = originalCollection;
   }
 });
