@@ -133,7 +133,7 @@
                 <input id="remember" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-brand-700 focus:ring-brand-500 focus:ring-offset-0">
                 <span>Remember me</span>
               </label>
-              <span class="text-xs text-ink-faint">Forgot? contact admin</span>
+              <a id="forgot-password" href="mailto:?subject=DoctorBot%20account%20recovery%20request" class="text-xs text-brand-700 hover:text-brand-800 underline-offset-2 hover:underline focus:outline-none focus:ring-2 focus:ring-brand-500/40 rounded">Forgot password? Contact admin</a>
             </div>
             <button class="btn btn-primary w-full h-11 text-base font-semibold shadow-lift" type="submit" id="login-submit">
               <span id="login-submit-label">Sign in</span>
@@ -1977,6 +1977,42 @@ function readFacilityPricing() {
     });
   }
 
+  // Prefill the email the doctor chose to remember, and keep the forgot password link
+  // pointed at the Super Admin address. Both run before the form is submitted, so a
+  // slow connection cannot leave the link dead.
+  (function prefillRememberedEmail() {
+    try {
+      const remembered = window.localStorage.getItem('doctorbot_remembered_email');
+      if (remembered) {
+        const emailField = document.querySelector('#email');
+        const rememberBox = document.querySelector('#remember');
+        if (emailField) emailField.value = remembered;
+        if (rememberBox) rememberBox.checked = true;
+      }
+    } catch (error) {
+      // Storage can be disabled; the form still works, it just will not prefill.
+    }
+  })();
+
+  (function wireForgotPassword() {
+    const link = document.querySelector('#forgot-password');
+    if (!link) return;
+    const fallback = 'mailto:?subject=DoctorBot%20account%20recovery%20request';
+    link.setAttribute('href', fallback);
+    fetch('/api/dashboard/contact', { credentials: 'same-origin' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (data && data.email) {
+          const subject = encodeURIComponent('DoctorBot account recovery or support request');
+          const body = encodeURIComponent('Hello,\n\nI need help accessing my DoctorBot dashboard.\n\nClinic: \nDoctor name: \nRegistered email: \n\nThank you.');
+          link.setAttribute('href', `mailto:${data.email}?subject=${subject}&body=${body}`);
+        }
+      })
+      .catch(() => {
+        // Leave the fallback in place. The link still opens a compose window.
+      });
+  })();
+
   document.querySelector('#login-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const submitButton = document.querySelector('#login-submit');
@@ -1998,6 +2034,16 @@ function readFacilityPricing() {
         const sessionResponse = await fetch('/api/dashboard/session', { credentials: 'same-origin' });
         if (!sessionResponse.ok) throw new Error('Could not load dashboard session.');
         showDashboard(await sessionResponse.json());
+        const rememberBox = document.querySelector('#remember');
+        try {
+          if (rememberBox && rememberBox.checked) {
+            window.localStorage.setItem('doctorbot_remembered_email', document.querySelector('#email').value.trim());
+          } else {
+            window.localStorage.removeItem('doctorbot_remembered_email');
+          }
+        } catch (error) {
+          // Storage can be disabled; the session still works through the cookie.
+        }
       } catch (error) {
         showError(error.message);
       } finally {

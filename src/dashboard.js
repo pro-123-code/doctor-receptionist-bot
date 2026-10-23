@@ -19,7 +19,11 @@ const { normalizeClinicTimingInput, normalizeReportTime, resolveClinicTiming } =
 const { verifyDoctorCalendarAccess } = require('./calendarAccess');
 
 const cookieName = 'doctorbot_dashboard';
+// A normal session lasts a working day. Remember me extends it to a month, so a
+// doctor who ticks it is not asked to log in again every morning, but an unticked
+// box still expires quickly enough that a shared or borrowed machine is safe.
 const sessionDurationSeconds = 8 * 60 * 60;
+const rememberedSessionDurationSeconds = 30 * 24 * 60 * 60;
 
 function getDashboardSecret() {
   const sessionSecret = process.env.DASHBOARD_SESSION_SECRET;
@@ -504,8 +508,17 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     response.sendFile(path.join(__dirname, 'dashboard.html'));
   });
 
+  // Public, because the login page needs it before anyone is authenticated. It only
+  // exposes an address a doctor can already see on the login screen, never a secret.
+  app.get('/api/dashboard/contact', (_request, response) => {
+    const email = (process.env.LEGAL_CONTACT_EMAIL || process.env.DASHBOARD_EMAIL
+      || process.env.SUPERADMIN_EMAIL || '').trim().toLowerCase();
+    response.json({ email: email || null });
+  });
+
   app.post('/api/dashboard/login', async (request, response) => {
-    const { email, password } = request.body || {};
+    const { email, password, remember } = request.body || {};
+    const rememberMe = remember === true;
     const secret = getDashboardSecret();
 
     if (!secret || secret.length < 32) {
@@ -544,12 +557,13 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       return response.status(403).json({ error: 'Doctor account is inactive' });
     }
 
-    const token = createSessionToken(user, secret, Date.now() + sessionDurationSeconds * 1000);
+    const lifetime = rememberMe ? rememberedSessionDurationSeconds : sessionDurationSeconds;
+    const token = createSessionToken(user, secret, Date.now() + lifetime * 1000);
     response.cookie(cookieName, token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
-      maxAge: sessionDurationSeconds * 1000,
+      maxAge: lifetime * 1000,
       path: '/'
     });
     response.json({ authenticated: true });

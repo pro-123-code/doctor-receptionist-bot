@@ -187,6 +187,9 @@ function createHarness() {
     '/api/dashboard/whatsapp/status': {
       status: 'connected', qrDataUrl: null, sessionPersistent: true, sessionNotice: null
     },
+    '/api/dashboard/contact': {
+      email: 'support@doctorbot.example'
+    },
     '/api/dashboard/calendar/status': {
       connected: true, verified: true, calendarId: 'primary', calendarIdEditable: false,
       verificationCode: null, verificationMessage: null, oauthAvailable: true,
