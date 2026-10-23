@@ -57,28 +57,93 @@
 </head>
 <body class="min-h-screen font-sans text-ink antialiased">
 
-    <section id="login" class="min-h-screen flex items-center justify-center px-4 py-10" aria-labelledby="login-title">
-      <div class="w-full max-w-md">
-        <div class="text-center mb-7">
-          <div class="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-700 text-white text-xl font-extrabold shadow-lift mb-4">D</div>
-          <div class="eyebrow">DoctorBot</div>
-          <h1 id="login-title" class="mt-1 text-3xl font-extrabold tracking-tight text-slate-900">Clinic Dashboard</h1>
-          <p class="mt-2 text-ink-soft text-sm">Sign in to manage appointments, clinic setup and connections.</p>
+    <section id="login" class="min-h-screen grid lg:grid-cols-2" aria-labelledby="login-title">
+      <!-- Brand panel: shown on large screens. On phones the form goes full width and
+           the brand mark collapses into a single line above it. -->
+      <aside class="hidden lg:flex relative flex-col justify-between overflow-hidden bg-gradient-to-br from-brand-700 via-brand-800 to-brand-950 px-12 py-10 text-white">
+        <div class="absolute -top-32 -right-32 h-96 w-96 rounded-full bg-white/5"></div>
+        <div class="absolute bottom-0 -left-24 h-80 w-80 rounded-full bg-brand-500/20 blur-3xl"></div>
+        <div class="relative z-10">
+          <div class="flex items-center gap-3">
+            <span class="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-white/15 backdrop-blur font-extrabold text-xl shadow-lift">D</span>
+            <span class="text-lg font-bold tracking-tight">DoctorBot</span>
+          </div>
+          <h2 class="mt-16 text-4xl font-extrabold tracking-tight leading-[1.1] max-w-md">Your clinic, always open.</h2>
+          <p class="mt-5 text-brand-100 text-lg leading-relaxed max-w-md">Patients book, reschedule and cancel by WhatsApp. You manage appointments, pricing and connections from one calm dashboard.</p>
+          <ul class="mt-10 space-y-4 text-sm">
+            <li class="flex items-center gap-3">
+              <span class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/15 text-brand-50">
+                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd"/></svg>
+              </span>
+              Booking, rescheduling and cancellation by message
+            </li>
+            <li class="flex items-center gap-3">
+              <span class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/15 text-brand-50">
+                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd"/></svg>
+              </span>
+              Religious holidays auto-synced, overridable per clinic
+            </li>
+            <li class="flex items-center gap-3">
+              <span class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/15 text-brand-50">
+                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd"/></svg>
+              </span>
+              Multi-tenant, signed HttpOnly sessions
+            </li>
+          </ul>
         </div>
-        <div class="surface p-7">
-          <form id="login-form" class="space-y-4">
+        <div class="relative z-10 flex items-center justify-between text-xs text-brand-200">
+          <span>DoctorBot · Reception assistant</span>
+          <span>&copy; 2026</span>
+        </div>
+      </aside>
+
+      <div class="flex items-center justify-center px-4 py-10 bg-slate-50">
+        <div class="w-full max-w-sm">
+          <div class="lg:hidden text-center mb-8">
+            <span class="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-700 text-white text-xl font-extrabold shadow-lift mb-3">D</span>
+            <p class="text-lg font-bold tracking-tight text-slate-900">DoctorBot</p>
+          </div>
+          <h1 id="login-title" class="text-2xl font-extrabold tracking-tight text-slate-900">Sign in</h1>
+          <p class="mt-2 text-ink-soft text-sm">Manage appointments, clinic setup and connections.</p>
+          <form id="login-form" class="mt-7 space-y-5">
             <div>
-              <label class="label" for="email">Email</label>
-              <input id="email" class="field" type="email" autocomplete="username" required>
+              <label class="label" for="email">Email address</label>
+              <div class="relative">
+                <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center text-ink-faint">
+                  <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M3 4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4Zm2 2.5v.5l5 3.333L15 7v-.5L10 9.833 5 6.5Z"/></svg>
+                </span>
+                <input id="email" class="field pl-10" type="email" autocomplete="username" required placeholder="you@clinic.com">
+              </div>
             </div>
             <div>
               <label class="label" for="password">Password</label>
-              <input id="password" class="field" type="password" autocomplete="current-password" required>
+              <div class="relative">
+                <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center text-ink-faint">
+                  <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M10 1a4.5 4.5 0 0 0-4.5 4.5V9H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-.5V5.5A4.5 4.5 0 0 0 10 1Zm3 8V5.5a3 3 0 1 0-6 0V9h6Z" clip-rule="evenodd"/></svg>
+                </span>
+                <input id="password" class="field pl-10 pr-11" type="password" autocomplete="current-password" required placeholder="••••••••">
+                <button type="button" id="toggle-password" class="absolute inset-y-0 right-2 flex items-center rounded-lg px-2 text-ink-faint transition-colors hover:text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500/40" aria-label="Show password" aria-pressed="false">
+                  <svg id="icon-eye" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/><path fill-rule="evenodd" d="M.664 10.59a1.65 1.65 0 0 1 0-1.186A10.004 10.004 0 0 1 10 3c4.257 0 7.893 2.66 9.336 6.41.147.381.146.804 0 1.186A10.004 10.004 0 0 1 10 17c-4.257 0-7.893-2.66-9.336-6.41ZM14 10a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" clip-rule="evenodd"/></svg>
+                  <svg id="icon-eye-off" class="h-4 w-4 hidden" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M3.28 2.22a.75.75 0 0 0-1.06 1.06l14.5 14.5a.75.75 0 1 0 1.06-1.06l-1.745-1.745a10.029 10.029 0 0 0 3.3-4.38 1.651 1.651 0 0 0 0-1.185A10.004 10.004 0 0 0 9.999 3a9.956 9.956 0 0 0-4.744 1.194L3.28 2.22ZM7.8 7.054A3.5 3.5 0 0 1 12.946 12.2L7.8 7.054ZM10.746 17.028a10.055 10.055 0 0 1-6.067-1.694L2.99 13.645 1.22 11.875a.75.75 0 0 1 0-1.06l1.13-1.13a.75.75 0 0 1 1.06 0l.35.35a8.528 8.528 0 0 0 1.56 1.56l1.5 1.5a8.5 8.5 0 0 0 2.9 1.746 8.5 8.5 0 0 0 2.026.187Z" clip-rule="evenodd"/></svg>
+                </button>
+              </div>
             </div>
-            <button class="btn btn-primary w-full" type="submit">Sign in</button>
+            <div class="flex items-center justify-between gap-3 text-sm">
+              <label class="inline-flex items-center gap-2 text-ink-soft cursor-pointer select-none">
+                <input id="remember" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-brand-700 focus:ring-brand-500 focus:ring-offset-0">
+                <span>Remember me</span>
+              </label>
+              <span class="text-xs text-ink-faint">Forgot? contact admin</span>
+            </div>
+            <button class="btn btn-primary w-full h-11 text-base font-semibold shadow-lift" type="submit" id="login-submit">
+              <span id="login-submit-label">Sign in</span>
+            </button>
           </form>
+          <p class="hint text-center mt-6 flex items-center justify-center gap-1.5 text-xs">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M10 1a4.5 4.5 0 0 0-4.5 4.5V9H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-.5V5.5A4.5 4.5 0 0 0 10 1Zm3 8V5.5a3 3 0 1 0-6 0V9h6Z" clip-rule="evenodd"/></svg>
+            Secured with signed, HttpOnly sessions.
+          </p>
         </div>
-        <p class="hint text-center mt-5">Secured with signed, HttpOnly sessions.</p>
       </div>
     </section>
 
@@ -1895,10 +1960,31 @@ function readFacilityPricing() {
       return rows;
     }
 
-    document.querySelector('#login-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      notice.hidden = true;
-      try {
+    // Toggle the password field between hidden and visible. Done with text rather than
+  // an icon swap so the state is announced to screen readers without extra ARIA.
+  const togglePassword = document.querySelector('#toggle-password');
+  if (togglePassword) {
+    togglePassword.addEventListener('click', () => {
+      const field = document.querySelector('#password');
+      const eye = document.querySelector('#icon-eye');
+      const eyeOff = document.querySelector('#icon-eye-off');
+      const showing = field.type === 'text';
+      field.type = showing ? 'password' : 'text';
+      togglePassword.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+      togglePassword.setAttribute('aria-pressed', showing ? 'false' : 'true');
+      if (eye) eye.classList.toggle('hidden', !showing);
+      if (eyeOff) eyeOff.classList.toggle('hidden', showing);
+    });
+  }
+
+  document.querySelector('#login-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitButton = document.querySelector('#login-submit');
+    const submitLabel = document.querySelector('#login-submit-label');
+    if (submitButton) submitButton.disabled = true;
+    if (submitLabel) submitLabel.textContent = 'Signing in…';
+    notice.hidden = true;
+    try {
         const response = await fetch('/api/dashboard/login', {
           method: 'POST',
           credentials: 'same-origin',
@@ -1914,6 +2000,11 @@ function readFacilityPricing() {
         showDashboard(await sessionResponse.json());
       } catch (error) {
         showError(error.message);
+      } finally {
+        const submitButton = document.querySelector('#login-submit');
+        const submitLabel = document.querySelector('#login-submit-label');
+        if (submitButton) submitButton.disabled = false;
+        if (submitLabel) submitLabel.textContent = 'Sign in';
       }
     });
 
