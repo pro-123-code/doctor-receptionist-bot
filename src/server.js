@@ -1392,6 +1392,9 @@ async function startDoctorWhatsApp(doctorProfile) {
   const authDirectory = getWhatsAppAuthDirectory(targetDoctorId);
   let socket;
   let saveCreds;
+  // Kept outside the try so the connection handler below can clear a session that
+  // WhatsApp has revoked; a logged out device can never be reused.
+  let authState = null;
   try {
     if (!await Doctor.exists({ doctorId: targetDoctorId, isActive: true })) {
       whatsappConnectionStates.set(targetDoctorId, { status: 'disconnected' });
@@ -1401,12 +1404,10 @@ async function startDoctorWhatsApp(doctorProfile) {
     // Prefer MongoDB for the session. It survives deploys that wipe the
     // filesystem, so a clinic stops having to rescan its QR code every release.
     // The file store stays as a fallback for a deployment with no database.
-    let authState;
     if (mongoSessionsAvailable()) {
-      authState = createMongoAuthState(targetDoctorId);
-      const existingCreds = await authState.state.creds.get();
-      whatsappAuthMode = existingCreds ? 'mongodb' : 'mongodb-empty';
-      if (existingCreds) {
+      authState = await createMongoAuthState(targetDoctorId);
+      whatsappAuthMode = authState.hadStoredCreds ? 'mongodb' : 'mongodb-empty';
+      if (authState.hadStoredCreds) {
         // A session previously stored on disk must not be left to compete with the
         // database copy, so the files are cleared once MongoDB is the source.
         await clearWhatsAppAuthDirectory(authDirectory);
@@ -1464,6 +1465,17 @@ async function startDoctorWhatsApp(doctorProfile) {
       } else {
         whatsappConnectionStates.set(targetDoctorId, { status: 'loggedOut' });
         console.error(`WhatsApp logged out for doctor ${doctorProfile.doctorId}. Re-link that clinic's number.`);
+        // The credentials WhatsApp revoked can never open a session again. Clearing
+        // them is what lets the next "Connect WhatsApp" click show a fresh QR code
+        // instead of failing forever against a dead device session.
+        (async () => {
+          try {
+            if (authState && typeof authState.wipe === 'function') await authState.wipe();
+          } catch {
+            // A failed wipe must not stop the directory cleanup below.
+          }
+          await clearWhatsAppAuthDirectory(authDirectory);
+        })().catch(() => {});
       }
     }
   });

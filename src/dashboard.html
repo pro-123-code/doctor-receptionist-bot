@@ -147,6 +147,34 @@
       </div>
     </section>
 
+    <!-- Clicking "Contact admin" on the login page opens this instead of relying on a
+         bare mailto. A machine with no mail app registered does nothing at all when a
+         mailto link is clicked, which looks like a broken link. The dialog always
+         shows the address, so it works even then. -->
+    <dialog id="contact-admin-dialog" class="w-[calc(100%-2rem)] max-w-md rounded-2xl border border-slate-200 bg-white p-0 shadow-2xl" aria-labelledby="contact-admin-title">
+      <div class="p-6">
+        <div class="flex items-start gap-3">
+          <span class="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-50 text-brand-700">
+            <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M3 4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4Zm2 2.5v.5l5 3.333L15 7v-.5L10 9.833 5 6.5Z"/></svg>
+          </span>
+          <div class="min-w-0">
+            <h2 id="contact-admin-title" class="text-base font-bold text-slate-900">Contact your administrator</h2>
+            <p class="mt-1 text-sm text-ink-soft">Password resets are handled by the Super Admin. Email them from your registered address and they will restore access.</p>
+          </div>
+        </div>
+        <div class="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-ink-faint">Administrator email</p>
+          <p id="contact-admin-email" class="mt-1 break-all text-sm font-semibold text-slate-900">Loading&hellip;</p>
+        </div>
+        <div class="mt-5 flex flex-col gap-2 sm:flex-row">
+          <a id="contact-admin-mail" href="mailto:?subject=DoctorBot%20account%20recovery%20request" class="btn btn-primary flex-1">Open email app</a>
+          <button id="contact-admin-copy" type="button" class="btn btn-outline flex-1">Copy address</button>
+        </div>
+        <p id="contact-admin-copied" class="mt-2 text-center text-xs font-semibold text-emerald-700" hidden>Address copied.</p>
+        <button id="contact-admin-close" type="button" class="btn btn-ghost mt-2 w-full">Close</button>
+      </div>
+    </dialog>
+
     <div id="app-shell" class="min-h-screen md:flex" hidden>
       <aside class="hidden md:flex md:w-64 lg:w-72 shrink-0 flex-col border-r border-slate-200 bg-white">
         <div class="px-6 py-6 border-b border-slate-100">
@@ -1996,21 +2024,72 @@ function readFacilityPricing() {
 
   (function wireForgotPassword() {
     const link = document.querySelector('#forgot-password');
+    const dialog = document.querySelector('#contact-admin-dialog');
+    const emailLabel = document.querySelector('#contact-admin-email');
+    const mailButton = document.querySelector('#contact-admin-mail');
+    const copyButton = document.querySelector('#contact-admin-copy');
+    const copiedNote = document.querySelector('#contact-admin-copied');
+    const closeButton = document.querySelector('#contact-admin-close');
     if (!link) return;
-    const fallback = 'mailto:?subject=DoctorBot%20account%20recovery%20request';
-    link.setAttribute('href', fallback);
+
+    const subject = encodeURIComponent('DoctorBot account recovery or support request');
+    const body = encodeURIComponent('Hello,\n\nI need help accessing my DoctorBot dashboard.\n\nClinic: \nDoctor name: \nRegistered email: \n\nThank you.');
+
+    let adminEmail = null;
+
+    function mailtoHref(email) {
+      return email
+        ? `mailto:${email}?subject=${subject}&body=${body}`
+        : `mailto:?subject=${subject}&body=${body}`;
+    }
+
+    function applyEmail(email) {
+      adminEmail = email || null;
+      const label = adminEmail || 'Not configured. Ask your doctor for the support address.';
+      if (emailLabel) emailLabel.textContent = label;
+      if (mailButton) mailButton.setAttribute('href', mailtoHref(adminEmail));
+      link.setAttribute('href', mailtoHref(adminEmail));
+    }
+
+    link.setAttribute('href', mailtoHref(null));
+    if (mailButton) mailButton.setAttribute('href', mailtoHref(null));
+    if (emailLabel) emailLabel.textContent = 'Loading…';
+
     fetch('/api/dashboard/contact', { credentials: 'same-origin' })
       .then((response) => (response.ok ? response.json() : null))
-      .then((data) => {
-        if (data && data.email) {
-          const subject = encodeURIComponent('DoctorBot account recovery or support request');
-          const body = encodeURIComponent('Hello,\n\nI need help accessing my DoctorBot dashboard.\n\nClinic: \nDoctor name: \nRegistered email: \n\nThank you.');
-          link.setAttribute('href', `mailto:${data.email}?subject=${subject}&body=${body}`);
-        }
-      })
-      .catch(() => {
-        // Leave the fallback in place. The link still opens a compose window.
+      .then((data) => applyEmail(data && data.email))
+      .catch(() => applyEmail(null));
+
+    // The dialog is the point. A bare mailto click does nothing at all on a machine
+    // with no mail app registered, which is indistinguishable from a broken link, so
+    // the address is always shown and can be copied by hand.
+    if (link.addEventListener) {
+      link.addEventListener('click', (event) => {
+        if (!dialog || typeof dialog.showModal !== 'function') return; // fall back to the mailto
+        event.preventDefault();
+        if (copiedNote) copiedNote.hidden = true;
+        dialog.showModal();
       });
+    }
+
+    if (closeButton) closeButton.addEventListener('click', () => dialog && dialog.close && dialog.close());
+
+    if (copyButton) {
+      copyButton.addEventListener('click', async () => {
+        if (!adminEmail) return;
+        const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+        try {
+          if (!clipboard || typeof clipboard.writeText !== 'function') {
+            throw new Error('clipboard unavailable');
+          }
+          await clipboard.writeText(adminEmail);
+          if (copiedNote) copiedNote.hidden = false;
+        } catch {
+          // No clipboard API: keep the address on screen so it can be selected.
+          if (emailLabel) emailLabel.textContent = adminEmail;
+        }
+      });
+    }
   })();
 
   document.querySelector('#login-form').addEventListener('submit', async (event) => {

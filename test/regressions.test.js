@@ -3969,27 +3969,100 @@ function withFakeAuthCollection(run) {
   return run(createFakeCollection());
 }
 
-test('the WhatsApp auth store saves and restores credentials in MongoDB', async () => {
+// Credentials shaped like initAuthCreds() output. The store only needs the fields
+// Baileys reads before it can emit a QR code, so the tests generate them cheaply
+// instead of requiring the real package.
+function makeFakeCreds(overrides = {}) {
+  return {
+    noiseKey: { private: 'noise-private', public: 'noise-public' },
+    signedIdentityKey: { private: 'identity-private', public: 'identity-public' },
+    signedPreKey: { keyId: 1, keyPair: { private: 'pre-private', public: 'pre-public' }, signature: 'signature' },
+    registrationId: 1234,
+    advSecretKey: 'adv-secret',
+    registered: false,
+    ...overrides
+  };
+}
+
+const initFakeCreds = () => makeFakeCreds();
+
+test('a new clinic gets a live creds object, which is what Baileys actually reads', async () => {
   await withFakeAuthCollection(async (Model) => {
     const { createMongoAuthState } = require('../src/whatsappAuthStore');
-    const auth = createMongoAuthState('clinic-mongo', { Model });
+    const auth = await createMongoAuthState('clinic-mongo', { Model, initAuthCreds: initFakeCreds });
 
-    assert.equal(await auth.state.creds.get(), null, 'a new clinic starts with no credentials');
+    assert.equal(auth.hadStoredCreds, false, 'a new clinic starts with no credentials');
+    assert.equal(typeof auth.state.creds, 'object');
+    assert.equal(typeof auth.state.creds.get, 'undefined',
+      'state.creds must be the credentials themselves, never a getter wrapper');
+    assert.ok(auth.state.creds.noiseKey,
+      'Baileys reads creds.noiseKey while building the socket, so it must exist');
+    assert.ok(auth.state.creds.signedIdentityKey);
+    assert.equal(typeof auth.state.keys.get, 'function');
+    assert.equal(typeof auth.state.keys.set, 'function');
+  });
+});
 
-    const creds = { me: { id: '923001234567:12@s.whatsapp.net' }, registered: true, pairingCode: 'ABC' };
-    await auth.saveCreds(creds);
+test('saved credentials are restored on the next start', async () => {
+  await withFakeAuthCollection(async (Model) => {
+    const { createMongoAuthState } = require('../src/whatsappAuthStore');
+    const first = await createMongoAuthState('clinic-mongo', { Model, initAuthCreds: initFakeCreds });
+    first.state.creds.me = { id: '923001234567:12@s.whatsapp.net' };
+    first.state.creds.registered = true;
+    first.state.creds.pairingCode = 'ABC';
+    await first.saveCreds();
 
-    const restored = await auth.state.creds.get();
-    assert.equal(restored.registered, true);
-    assert.equal(restored.me.id, creds.me.id);
-    assert.equal(restored.pairingCode, 'ABC');
+    const second = await createMongoAuthState('clinic-mongo', { Model, initAuthCreds: initFakeCreds });
+    assert.equal(second.hadStoredCreds, true, 'a usable stored record must be recognised');
+    assert.equal(second.state.creds.registered, true);
+    assert.equal(second.state.creds.me.id, '923001234567:12@s.whatsapp.net');
+    assert.equal(second.state.creds.pairingCode, 'ABC');
+  });
+});
+
+test('an unusable stored record is discarded instead of being handed to Baileys', async () => {
+  // Exactly what the old broken store left behind: the update emitted by the socket,
+  // with none of the keys Baileys needs in order to start.
+  const Model = createFakeCollection([{
+    doctorId: 'clinic-partial',
+    storeType: 'creds',
+    storeId: '',
+    value: { me: { id: '923001234567:1@s.whatsapp.net' } },
+    expiresAt: null
+  }]);
+
+  const { createMongoAuthState } = require('../src/whatsappAuthStore');
+  const auth = await createMongoAuthState('clinic-partial', { Model, initAuthCreds: initFakeCreds });
+
+  assert.equal(auth.hadStoredCreds, false, 'a record without the required keys is not usable');
+  assert.ok(auth.state.creds.noiseKey, 'a fresh set of credentials replaces the broken record');
+  assert.equal(Model.__rows.filter((row) => row.storeType === 'creds').length, 0,
+    'the broken record is removed so the next save writes a clean one');
+});
+
+test('a partial creds.update does not overwrite the stored credentials', async () => {
+  await withFakeAuthCollection(async (Model) => {
+    const { createMongoAuthState } = require('../src/whatsappAuthStore');
+    const auth = await createMongoAuthState('clinic-update', { Model, initAuthCreds: initFakeCreds });
+    await auth.saveCreds();
+
+    // Baileys merges the update into the live creds object, then emits the partial
+    // update. The listener must persist the whole object, not the fragment.
+    Object.assign(auth.state.creds, { me: { id: '923001234567:1@s.whatsapp.net' } });
+    await auth.saveCreds({ me: { id: '923001234567:1@s.whatsapp.net' } });
+
+    const stored = Model.__rows.find((row) => row.storeType === 'creds');
+    assert.ok(stored.value.noiseKey, 'a partial update must not erase the key material');
+    assert.ok(stored.value.signedIdentityKey);
+    assert.equal(stored.value.registrationId, 1234);
+    assert.equal(stored.value.me.id, '923001234567:1@s.whatsapp.net');
   });
 });
 
 test('signal keys round trip through MongoDB as buffers', async () => {
   await withFakeAuthCollection(async (Model) => {
     const { createMongoAuthState } = require('../src/whatsappAuthStore');
-    const auth = createMongoAuthState('clinic-keys', { Model });
+    const auth = await createMongoAuthState('clinic-keys', { Model, initAuthCreds: initFakeCreds });
 
     await auth.state.keys.set({ 'pre-key': { 'PK-1': new Uint8Array([1, 2, 3, 250]) } });
 
@@ -4008,7 +4081,7 @@ test('signal keys round trip through MongoDB as buffers', async () => {
 test('a null value deletes the key, as Baileys expects', async () => {
   await withFakeAuthCollection(async (Model) => {
     const { createMongoAuthState } = require('../src/whatsappAuthStore');
-    const auth = createMongoAuthState('clinic-del', { Model });
+    const auth = await createMongoAuthState('clinic-del', { Model, initAuthCreds: initFakeCreds });
 
     await auth.state.keys.set({ session: { 'S-1': new Uint8Array([9]) } });
     assert.ok((await auth.state.keys.get('session', ['S-1']))['S-1']);
@@ -4022,18 +4095,24 @@ test('a null value deletes the key, as Baileys expects', async () => {
 test('each clinic session is isolated and wiping one leaves the others intact', async () => {
   await withFakeAuthCollection(async (Model) => {
     const { createMongoAuthState } = require('../src/whatsappAuthStore');
-    const first = createMongoAuthState('clinic-a', { Model });
-    const second = createMongoAuthState('clinic-b', { Model });
+    const first = await createMongoAuthState('clinic-a', { Model, initAuthCreds: initFakeCreds });
+    const second = await createMongoAuthState('clinic-b', { Model, initAuthCreds: initFakeCreds });
 
-    await first.saveCreds({ me: { id: 'a@s.whatsapp.net' }, registered: true });
-    await second.saveCreds({ me: { id: 'b@s.whatsapp.net' }, registered: true });
+    first.state.creds.me = { id: 'a@s.whatsapp.net' };
+    first.state.creds.registered = true;
+    await first.saveCreds();
+    second.state.creds.me = { id: 'b@s.whatsapp.net' };
+    second.state.creds.registered = true;
+    await second.saveCreds();
 
-    assert.equal((await first.state.creds.get()).me.id, 'a@s.whatsapp.net');
-    assert.equal((await second.state.creds.get()).me.id, 'b@s.whatsapp.net');
+    assert.equal(first.state.creds.me.id, 'a@s.whatsapp.net');
+    assert.equal(second.state.creds.me.id, 'b@s.whatsapp.net');
 
     await first.wipe();
-    assert.equal(await first.state.creds.get(), null);
-    assert.equal((await second.state.creds.get()).me.id, 'b@s.whatsapp.net',
+    const restoredFirst = await createMongoAuthState('clinic-a', { Model, initAuthCreds: initFakeCreds });
+    const restoredSecond = await createMongoAuthState('clinic-b', { Model, initAuthCreds: initFakeCreds });
+    assert.equal(restoredFirst.hadStoredCreds, false);
+    assert.equal(restoredSecond.state.creds.me.id, 'b@s.whatsapp.net',
       'wiping one clinic must not remove another clinic session');
   });
 });
@@ -4041,7 +4120,7 @@ test('each clinic session is isolated and wiping one leaves the others intact', 
 test('every stored document carries its clinic so a clinic can be wiped safely', async () => {
   await withFakeAuthCollection(async (Model) => {
     const { createMongoAuthState } = require('../src/whatsappAuthStore');
-    const auth = createMongoAuthState('clinic-scoped', { Model });
+    const auth = await createMongoAuthState('clinic-scoped', { Model, initAuthCreds: initFakeCreds });
     await auth.state.keys.set({ 'sender-key': { 'SK-1': new Uint8Array([5]) } });
 
     const rows = auth.Model.__rows;
@@ -4054,7 +4133,7 @@ test('expiring key types get a retention date and durable key types do not', asy
   await withFakeAuthCollection(async (Model) => {
     const { createMongoAuthState } = require('../src/whatsappAuthStore');
     await Model.deleteMany({});
-    const auth = createMongoAuthState('clinic-ttl', { Model });
+    const auth = await createMongoAuthState('clinic-ttl', { Model, initAuthCreds: initFakeCreds });
 
     await auth.state.keys.set({
       'pre-key': { 'PK-1': new Uint8Array([1]) },
@@ -4068,6 +4147,15 @@ test('expiring key types get a retention date and durable key types do not', asy
     assert.ok(session.expiresAt instanceof Date, 'session state should be given a retention date');
   });
 });
+test('the credential fields the store insists on match what Baileys generates', () => {
+  // If this drifts, isUsableCreds would reject a perfectly good stored session and
+  // every clinic would be logged out and forced to rescan on each restart.
+  const { initAuthCreds } = require('@whiskeysockets/baileys');
+  const { isUsableCreds } = require('../src/whatsappAuthStore');
+  assert.equal(isUsableCreds(initAuthCreds()), true,
+    'a freshly generated credential set must be accepted as usable');
+});
+
 test('an appointment range shows bookings across several days', async () => {
   const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
   const secret = 'range-session-secret-long-enough';
@@ -4621,6 +4709,20 @@ test('the database session store is actually reachable', () => {
   // And the fallback must still exist, so a deployment with no database still works.
   assert.match(source, /useMultiFileAuthState\(authDirectory\)/,
     'the file store must remain as a fallback when there is no database');
+});
+
+test('a logged out WhatsApp session is wiped so the next connect can show a QR code', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  // WhatsApp revokes the device on logout, so the stored credentials are dead.
+  // Keeping them means every reconnect fails and the doctor can never re-link.
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const marker = source.indexOf("whatsappConnectionStates.set(targetDoctorId, { status: 'loggedOut' })");
+  assert.ok(marker > 0, 'the logged out branch must exist');
+  const branch = source.slice(marker, marker + 900);
+  assert.match(branch, /authState\.wipe\(\)/,
+    'the revoked session must be deleted before the next connect attempt');
 });
 
 test('the two WhatsApp session warnings cannot contradict each other', () => {

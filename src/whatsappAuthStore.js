@@ -5,10 +5,14 @@
 // credentials and the Signal keys therefore live in MongoDB, which is already
 // persistent and already the system of record for every other clinic setting.
 //
-// The store satisfies Baileys' SignalKeyStore contract: get(type, ids) returns a
-// map keyed by id, set(data) writes a set per type, and a null value means delete.
-// Uint8Array values are converted to Buffer because that is what the MongoDB
-// driver stores natively.
+// IMPORTANT: this must match Baileys' own contract exactly. AuthenticationState is
+// { creds, keys } where `creds` is the live credential OBJECT, not a getter. Baileys
+// reads creds.noiseKey / creds.signedIdentityKey / creds.registrationId while it
+// builds the socket and mutates the same object as the handshake progresses, then
+// emits a partial `creds.update`; the listener is expected to persist the whole
+// object. An earlier version of this file passed a { get, set, clear } wrapper as
+// `creds` and wrote each partial update over the stored record, which made every
+// connection fail during setup and left unusable credentials behind.
 const mongoose = require('mongoose');
 
 // Baileys value per store type. 'pre-key' and 'sender-key' must survive a restart
@@ -16,10 +20,39 @@ const mongoose = require('mongoose');
 const PERSISTENT_TYPES = new Set(['pre-key', 'sender-key']);
 const EXPIRING_TYPES = new Set(['session', 'sender-key-memory', 'app-state-sync-key', 'app-state-sync-version']);
 
+// A record written by a broken or half-finished login can exist but still be
+// unusable. These are the fields Baileys touches before it can ever emit a QR code,
+// so a record missing any of them is treated as no record at all and replaced.
+const REQUIRED_CREDS_FIELDS = ['noiseKey', 'signedIdentityKey', 'signedPreKey', 'registrationId', 'advSecretKey'];
+
+// Baileys is loaded lazily so this module stays testable without the package and so
+// a deployment without WhatsApp support does not fail at require time.
+function defaultInitAuthCreds() {
+  // eslint-disable-next-line global-require
+  const baileys = require('@whiskeysockets/baileys');
+  return baileys.initAuthCreds();
+}
+
 function toBuffer(value) {
   if (value === null || value === undefined) return null;
   if (Buffer.isBuffer(value)) return value;
   if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  return value;
+}
+
+// Protobuf instances (app state sync keys) and similar wrappers must be stored as
+// plain objects. Buffers expose a toJSON of their own that would corrupt them, so
+// they are excluded first.
+function toStorable(value) {
+  const buffered = toBuffer(value);
+  if (buffered !== value) return buffered;
+  if (value && typeof value.toJSON === 'function' && !Buffer.isBuffer(value)) {
+    try {
+      return value.toJSON();
+    } catch {
+      return value;
+    }
+  }
   return value;
 }
 
@@ -41,27 +74,43 @@ function documentId(doctorId, storeType, storeId) {
   return `${doctorId}:${storeType}:${storeId}`;
 }
 
+// True only when the stored record has everything a socket needs to start.
+function isUsableCreds(creds) {
+  if (!creds || typeof creds !== 'object') return false;
+  return REQUIRED_CREDS_FIELDS.every((field) => {
+    const value = creds[field];
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'object' && Object.keys(value).length === 0) return false;
+    return true;
+  });
+}
+
 // Builds the Baileys auth state backed by MongoDB for one clinic.
-// The model can be supplied so the store can be exercised without a live database.
-function createMongoAuthState(doctorId, options = {}) {
+// The model can be supplied so the store can be exercised without a live database,
+// and initAuthCreds can be supplied so tests need no copy of Baileys.
+async function createMongoAuthState(doctorId, options = {}) {
   const Model = options.Model || whatsappAuthSchema();
+  const initAuthCreds = options.initAuthCreds || defaultInitAuthCreds;
   const scoped = { doctorId };
 
-  const credsModel = {
-    async get() {
-      const doc = await Model.findOne({ ...scoped, storeType: 'creds', storeId: '' }).lean();
-      return doc?.value || null;
-    },
-    async set(value) {
-      await Model.updateOne(
-        { ...scoped, storeType: 'creds', storeId: '' },
-        { $set: { value, expiresAt: null } },
-        { upsert: true }
-      );
-    },
-    async clear() {
-      await Model.deleteMany({ ...scoped });
-    }
+  const storedRow = await Model.findOne({ ...scoped, storeType: 'creds', storeId: '' }).lean();
+  const storedCreds = storedRow ? storedRow.value : null;
+  const hadStoredCreds = isUsableCreds(storedCreds);
+  if (storedRow && !hadStoredCreds) {
+    // Remove the unusable record so the next save writes a clean one.
+    await Model.deleteOne({ ...scoped, storeType: 'creds', storeId: '' });
+  }
+
+  // Baileys mutates this object in place; everything below persists the same
+  // reference, which is exactly what the file-backed store does.
+  const creds = hadStoredCreds ? storedCreds : initAuthCreds();
+
+  const saveCreds = async () => {
+    await Model.updateOne(
+      { ...scoped, storeType: 'creds', storeId: '' },
+      { $set: { value: creds, expiresAt: null } },
+      { upsert: true }
+    );
   };
 
   const keys = {
@@ -70,7 +119,11 @@ function createMongoAuthState(doctorId, options = {}) {
       const rows = await Model.find({ ...scoped, storeType: type, storeId: { $in: ids } }).lean();
       const data = {};
       for (const row of rows) {
-        if (row.value !== null && row.value !== undefined) data[row.storeId] = row.value;
+        if (row.value === null || row.value === undefined) continue;
+        // Baileys round-trips app state sync keys through a protobuf type, so a
+        // plain object read back from the database must be revived the same way
+        // the file store revives it.
+        data[row.storeId] = type === 'app-state-sync-key' ? reviveAppStateKey(row.value) : row.value;
       }
       return data;
     },
@@ -91,7 +144,7 @@ function createMongoAuthState(doctorId, options = {}) {
               filter,
               update: {
                 $set: {
-                  value: toBuffer(value),
+                  value: toStorable(value),
                   expiresAt: expiring && !PERSISTENT_TYPES.has(type) ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) : null
                 }
               },
@@ -108,13 +161,14 @@ function createMongoAuthState(doctorId, options = {}) {
   };
 
   return {
-    // Baileys only reads creds and keys out of the auth object, and writes creds
-    // through creds.update, which the socket triggers on every rotation.
-    state: { creds: credsModel, keys, getVersion: () => 3 },
-    saveCreds: async (creds) => {
-      if (!creds) return;
-      await credsModel.set(creds);
-    },
+    // The shape Baileys expects: a live creds object plus a Signal key store.
+    state: { creds, keys },
+    // Baileys emits a partial update; Object.assign into `creds` happens inside the
+    // socket before this listener runs, so the whole object is what must be saved.
+    saveCreds,
+    // Whether this call found usable credentials, which tells the caller whether the
+    // on-disk copy is now redundant and can be cleared.
+    hadStoredCreds,
     wipe: async () => {
       await Model.deleteMany({ ...scoped });
     },
@@ -122,11 +176,26 @@ function createMongoAuthState(doctorId, options = {}) {
   };
 }
 
+// Mongo returns BSON Binary as Buffer and plain objects as-is, so a stored record is
+// handed back unchanged; isUsableCreds decides whether it can be used.
+function reviveAppStateKey(value) {
+  try {
+    // eslint-disable-next-line global-require
+    const { proto } = require('@whiskeysockets/baileys');
+    return proto.Message.AppStateSyncKeyData.fromObject(value);
+  } catch {
+    return value;
+  }
+}
+
 module.exports = {
   EXPIRING_TYPES,
   PERSISTENT_TYPES,
+  REQUIRED_CREDS_FIELDS,
   createMongoAuthState,
   documentId,
+  isUsableCreds,
   toBuffer,
+  toStorable,
   whatsappAuthSchema
 };

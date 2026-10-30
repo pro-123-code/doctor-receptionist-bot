@@ -362,8 +362,37 @@ function rowByName(document, name) {
   return rows.find((row) => row.querySelector('[data-pricing-name]').value === name);
 }
 
+// Regression: "Contact admin" used to be a bare mailto link. On a machine with no
+// mail app registered, clicking it did nothing at all, so it looked like a dead link.
+// The dialog must open and must show the administrator address.
+async function verifyContactAdminDialog() {
+  const harness = createHarness();
+  vm.runInContext(script, harness.context, { filename: 'dashboard-inline.js' });
+  const link = harness.document.querySelector('#forgot-password');
+  const dialog = harness.document.querySelector('#contact-admin-dialog');
+  if (typeof link.handlers.click !== 'function') return 'the "Contact admin" link has no click handler';
+
+  let opened = false;
+  let prevented = false;
+  dialog.showModal = () => { opened = true; };
+  dialog.close = () => {};
+  link.handlers.click({ preventDefault() { prevented = true; } });
+  for (let tick = 0; tick < 8; tick += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+
+  if (!prevented) return 'clicking "Contact admin" was not intercepted, so a machine without a mail app shows nothing';
+  if (!opened) return 'clicking "Contact admin" did not open the administrator dialog';
+  const label = harness.document.querySelector('#contact-admin-email');
+  if (!label.textContent || label.textContent === 'Loading…') {
+    return 'the administrator email was never displayed in the dialog';
+  }
+  return null;
+}
+
 async function main() {
   const failures = [];
+
+  const contactFailure = await verifyContactAdminDialog();
+  if (contactFailure) failures.push(contactFailure);
   const doctorSession = {
     role: 'DOCTOR', doctorId: 'clinic-one', doctorName: 'Dr. Haider', clinicName: 'Apna city clinic'
   };
@@ -630,6 +659,7 @@ async function main() {
   console.log(`dashboard-runtime: clinic setup save payload verified, `
     + `appointments rendered with patient, time and reschedule and cancel actions, `
     + `doctor, superadmin and role-less sessions rendered, `
+    + `contact admin dialog opens with the administrator address, `
     + `${sweep.swept} functions swept for scope errors`);
 }
 
