@@ -6,10 +6,25 @@
 // pushed. This script closes the loop by reading the deployed files back.
 //
 // Usage: node scripts/verify-deployment.js [url]
+const { execFileSync } = require('node:child_process');
 const DEFAULT_URL = 'https://doctor-receptionist-bot.onrender.com';
 
 const failures = [];
 const notes = [];
+
+// Without an expected commit the script could only report what production happened
+// to be serving, yet still print "verified" — which is exactly the false green this
+// script exists to prevent. Fall back to the local HEAD so a local run answers the
+// question it claims to answer, and keep EXPECTED_COMMIT for CI where git may be
+// absent.
+function resolveExpectedCommit() {
+  if (process.env.EXPECTED_COMMIT) return process.env.EXPECTED_COMMIT.trim();
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  } catch {
+    return null;
+  }
+}
 
 function check(label, condition, detail) {
   if (condition) {
@@ -82,7 +97,7 @@ async function main() {
   if (build.ok) {
     version = await build.json().catch(() => null);
   }
-  const expected = process.env.EXPECTED_COMMIT;
+  const expected = resolveExpectedCommit();
   if (version) {
     check(`/version reports a commit`, typeof version.commit === 'string' && version.commit.length > 0,
       JSON.stringify(version));
@@ -91,6 +106,7 @@ async function main() {
       check(`live site runs ${shortExpected}`, version.shortCommit === shortExpected,
         `live site reports ${version.shortCommit}`);
     } else {
+      notes.push('no expected commit could be determined, so the deployed commit was not compared');
       console.log(`  note  live site is serving commit ${version.shortCommit}`);
     }
   } else {
