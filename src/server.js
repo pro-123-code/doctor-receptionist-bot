@@ -38,6 +38,16 @@ const {
   formatRescheduleConfirmation,
   wantsToChangeAppointment
 } = require('./appointmentReschedule');
+const {
+  detectPostBookingIntent,
+  formatClosingReply,
+  formatConfirmationReply,
+  formatGratitudeReply,
+  formatGreetingReply,
+  formatNotConfirmedReply,
+  formatPostBookingFallbackReply,
+  isConfirmationQuery
+} = require('./postBookingConversation');
 const { privacyPolicy, termsOfService } = require('./legalPages');
 
 const app = express();
@@ -248,6 +258,21 @@ function isGreeting(message) {
 
 function isFacilityQuestion(message) {
   return /\b(facilit(?:y|ies)|services?|treatments?|consultations?|prices?|rates?|costs?|fees?|charges?|what tests|which tests|do you (?:have|offer)|available at (?:the )?clinic)\b/i.test(message);
+}
+
+// Shared by the normal booking flow and post-booking follow-ups so a patient who
+// asks about fees after booking gets the same answer as everyone else.
+function buildFacilityReply(doctorProfile) {
+  const facilities = (doctorProfile.facilitiesList || [])
+    .map((facility) => formatFacilityRate(doctorProfile, facility)).join(', ');
+  const services = doctorProfile.servicesList?.length
+    ? ` Hamari services aur treatments: ${doctorProfile.servicesList.map((service) => formatFacilityRate(doctorProfile, service)).join(', ')}.`
+    : '';
+  const consultation = doctorProfile.consultationDetails?.trim()
+    ? ` ${doctorProfile.consultationDetails.trim()}`
+    : '';
+  const checkupFee = formatRupees(doctorProfile.basicCheckupFee) || 'price ke liye rabta karein';
+  return `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein yeh sahuliyaat mojood hain: ${facilities}. Basic checkup fee ${checkupFee}.${services}${consultation}`;
 }
 
 function getZonedParts(date) {
@@ -636,9 +661,25 @@ async function findPatientAppointment(sender, doctorId) {
     .lean();
 }
 
-async function startRescheduleFlow(sender, conversation, doctorProfile) {
+// The durable context for a patient's follow-up messages. The conversation record
+// is deleted as soon as a booking succeeds, so this is what stops the next
+// "thank you" or "is it confirmed?" from restarting the welcome menu. Only a
+// booking that is still ahead (or later today) counts, so an old appointment
+// does not keep a patient in post-booking mode forever.
+async function findPostBookingAppointment(sender, doctorId) {
+  const today = getLocalDateParts(new Date(), timeZone);
+  const { start } = getLocalDayBounds(today, timeZone);
+  return Appointment.findOne({
+    doctorId,
+    senderJid: sender,
+    status: 'booked',
+    slotStart: { $gte: start }
+  }).sort({ slotStart: 1 }).lean();
+}
+
+async function startRescheduleFlow(sender, conversation, doctorProfile, knownAppointment) {
   const targetDoctorId = doctorProfile.doctorId;
-  const appointment = await findPatientAppointment(sender, targetDoctorId);
+  const appointment = knownAppointment || await findPatientAppointment(sender, targetDoctorId);
 
   // Nothing booked, or nothing left in the future to move.
   if (!canReschedule(appointment)) {
@@ -868,6 +909,38 @@ async function handleConversationMessage(sender, message, doctorProfile) {
     conversation = undefined;
   }
   if (!conversation) {
+    // A booking deletes its conversation record. Look for the patient's own
+    // upcoming booking first so a follow-up is answered in context instead of
+    // being mistaken for a new patient and restarting the welcome menu.
+    const postBookingAppointment = await findPostBookingAppointment(sender, targetDoctorId);
+
+    if (postBookingAppointment && wantsToChangeAppointment(normalizedMessage)) {
+      conversation = { step: 'name', details: {}, senderJid: sender, updatedAt: Date.now() };
+      return startRescheduleFlow(sender, conversation, doctorProfile, postBookingAppointment);
+    }
+
+    if (postBookingAppointment) {
+      const intent = detectPostBookingIntent(normalizedMessage);
+      if (intent === 'newBooking') {
+        conversation = { step: 'name', details: {}, senderJid: sender, updatedAt: Date.now() };
+        await saveConversation(sender, conversation, targetDoctorId);
+        return welcomeMessage();
+      }
+      if (intent === 'confirmation') {
+        return formatConfirmationReply(postBookingAppointment, doctorProfile, timeZone);
+      }
+      if (intent === 'gratitude') return formatGratitudeReply(postBookingAppointment);
+      if (intent === 'closing') return formatClosingReply(postBookingAppointment);
+      if (intent === 'greeting') {
+        return formatGreetingReply(postBookingAppointment, doctorProfile, timeZone, normalizedMessage);
+      }
+      if (isFacilityQuestion(normalizedMessage)) return buildFacilityReply(doctorProfile);
+      return formatPostBookingFallbackReply(postBookingAppointment, doctorProfile, timeZone);
+    }
+
+    if (wantsToChangeAppointment(normalizedMessage)) return formatNoAppointmentReply();
+    if (isConfirmationQuery(normalizedMessage)) return formatNotConfirmedReply();
+
     conversation = { step: 'name', details: {}, senderJid: sender, updatedAt: Date.now() };
     await saveConversation(sender, conversation, targetDoctorId);
     return welcomeMessage();
@@ -875,18 +948,7 @@ async function handleConversationMessage(sender, message, doctorProfile) {
   conversation.senderJid = sender;
 
   if (isGreeting(normalizedMessage)) return welcomeMessage();
-  if (isFacilityQuestion(normalizedMessage)) {
-    const facilities = doctorProfile.facilitiesList
-      .map((facility) => formatFacilityRate(doctorProfile, facility)).join(', ');
-    const services = doctorProfile.servicesList?.length
-      ? ` Hamari services aur treatments: ${doctorProfile.servicesList.map((service) => formatFacilityRate(doctorProfile, service)).join(', ')}.`
-      : '';
-    const consultation = doctorProfile.consultationDetails?.trim()
-      ? ` ${doctorProfile.consultationDetails.trim()}`
-      : '';
-    const checkupFee = formatRupees(doctorProfile.basicCheckupFee) || 'price ke liye rabta karein';
-    return `${doctorProfile.doctorName} ke ${doctorProfile.clinicName} mein yeh sahuliyaat mojood hain: ${facilities}. Basic checkup fee ${checkupFee}.${services}${consultation}`;
-  }
+  if (isFacilityQuestion(normalizedMessage)) return buildFacilityReply(doctorProfile);
 
   if (conversation.step === RESCHEDULE_SELECTION_STEP) {
     return handleRescheduleSlotSelection(sender, conversation, normalizedMessage, doctorProfile);

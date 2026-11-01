@@ -4449,6 +4449,84 @@ test('the reschedule steps cannot collide with the booking steps', () => {
   }
 });
 
+test('post-booking follow-ups are understood without restarting the menu', () => {
+  const {
+    detectPostBookingIntent,
+    formatClosingReply,
+    formatConfirmationReply,
+    formatGratitudeReply,
+    formatNotConfirmedReply,
+    formatPostBookingFallbackReply
+  } = require('../src/postBookingConversation');
+
+  // The patient is asking whether their booking is real, or asking for its details.
+  for (const phrase of [
+    'is my appointment confirmed?', 'appointment confirm hai?', 'meri appointment kab hai',
+    'appointment time kya hai', 'kya appointment pakki hai', 'appointment book ho gayi hai?',
+    'please confirm my booking'
+  ]) {
+    assert.equal(detectPostBookingIntent(phrase), 'confirmation', `"${phrase}" is a confirmation query`);
+  }
+
+  for (const phrase of ['thank you so much', 'Thanks!', 'bohat shukriya', 'shukria', 'jazakAllah khair']) {
+    assert.equal(detectPostBookingIntent(phrase), 'gratitude', `"${phrase}" is gratitude`);
+  }
+
+  // "thanks bye" is a farewell, which is warmer than a plain thank-you reply.
+  for (const phrase of ['done', 'Okay', 'theek hai', 'ok done', 'acha', 'bye', 'Allah Hafiz', 'thanks bye']) {
+    assert.equal(detectPostBookingIntent(phrase), 'closing', `"${phrase}" closes the conversation`);
+  }
+
+  for (const phrase of ['salam', 'Assalam o Alaikum', 'hi', 'hello', 'aoa']) {
+    assert.equal(detectPostBookingIntent(phrase), 'greeting', `"${phrase}" is a greeting`);
+  }
+
+  // Only an explicit request starts a second booking.
+  for (const phrase of ['appointment', 'new appointment', 'appointment book karna hai', 'nayi appointment chahiye', 'book appointment']) {
+    assert.equal(detectPostBookingIntent(phrase), 'newBooking', `"${phrase}" asks for a new booking`);
+  }
+
+  // Real questions and free text must not be mistaken for a booking intent.
+  for (const phrase of ['mujhe bukhar hai', 'what are your timings', 'clinic kahan hai', '', null]) {
+    assert.equal(detectPostBookingIntent(phrase), null, `"${phrase}" is not a post-booking follow-up`);
+  }
+
+  const appointment = {
+    details: { name: 'Ali' },
+    slotStart: new Date('2026-11-06T05:00:00Z')
+  };
+  const doctor = { doctorName: 'Dr. Haider', clinicName: 'Apna city clinic' };
+  const confirmation = formatConfirmationReply(appointment, doctor, 'Asia/Karachi');
+  assert.match(confirmation, /Ali/);
+  assert.match(confirmation, /confirm/i);
+  assert.match(confirmation, /Apna city clinic/);
+  assert.match(confirmation, /reschedule/i);
+  assert.match(formatGratitudeReply(appointment), /shukriya/i);
+  assert.match(formatClosingReply(appointment), /Allah Hafiz/i);
+  assert.match(formatNotConfirmedReply(), /confirmed appointment nahi mili/i);
+  assert.match(formatPostBookingFallbackReply(appointment, doctor, 'Asia/Karachi'), /confirm hai/i);
+});
+
+test('a booked patient is answered in context before a new conversation starts', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+
+  const lookup = serverSource.indexOf('const postBookingAppointment = await findPostBookingAppointment');
+  const freshConversation = serverSource.indexOf(
+    "conversation = { step: 'name', details: {}, senderJid: sender, updatedAt: Date.now() };",
+    lookup
+  );
+  assert.ok(lookup > -1, 'the handler must look for the patient\'s upcoming booking');
+  assert.ok(freshConversation > -1 && lookup < freshConversation,
+    'the post-booking branch must run before a new welcome conversation is created');
+
+  // The lookup is scoped to this clinic and this sender, and only counts a
+  // booking that is still ahead.
+  assert.match(serverSource, /doctorId,\s*senderJid: sender,\s*status: 'booked',\s*slotStart: \{ \$gte: start \}/);
+  assert.match(serverSource, /startRescheduleFlow\(sender, conversation, doctorProfile, postBookingAppointment\)/);
+});
+
 test('a patient with no appointment is told so instead of entering the flow', async () => {
   const fs = require('node:fs');
   const path = require('node:path');
