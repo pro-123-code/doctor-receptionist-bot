@@ -33,11 +33,47 @@ function defaultInitAuthCreds() {
   return baileys.initAuthCreds();
 }
 
+function isBsonBinary(value) {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    value._bsontype === 'Binary' &&
+    Buffer.isBuffer(value.buffer)
+  );
+}
+
 function toBuffer(value) {
   if (value === null || value === undefined) return null;
   if (Buffer.isBuffer(value)) return value;
+  // The MongoDB driver returns BSON Binary by default, not a Node Buffer. A
+  // stored credential read back this way looks like an object and passes a
+  // simple presence check, but Baileys' Noise handshake needs a real Buffer.
+  if (isBsonBinary(value)) {
+    // Binary.value() respects the logical length when the backing buffer is
+    // larger than the stored value.
+    return typeof value.value === 'function' ? Buffer.from(value.value()) : Buffer.from(value.buffer);
+  }
   if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
   return value;
+}
+
+// Credentials and Signal keys contain Buffers nested inside plain objects and
+// arrays. Mongo round-trips those as BSON Binary, so every level has to be
+// revived before Baileys sees it. Objects with a BSON type marker that is not
+// Binary (Long, Decimal128, ObjectId) are left alone; Dates too.
+function reviveStoredValue(value) {
+  if (value === null || value === undefined) return value;
+  const buffered = toBuffer(value);
+  if (buffered !== value) return buffered;
+  if (Buffer.isBuffer(value)) return value;
+  if (Array.isArray(value)) return value.map(reviveStoredValue);
+  if (typeof value !== 'object') return value;
+  if (value instanceof Date || value._bsontype) return value;
+  const revived = {};
+  for (const [key, entry] of Object.entries(value)) {
+    revived[key] = reviveStoredValue(entry);
+  }
+  return revived;
 }
 
 // Protobuf instances (app state sync keys) and similar wrappers must be stored as
@@ -94,7 +130,9 @@ async function createMongoAuthState(doctorId, options = {}) {
   const scoped = { doctorId };
 
   const storedRow = await Model.findOne({ ...scoped, storeType: 'creds', storeId: '' }).lean();
-  const storedCreds = storedRow ? storedRow.value : null;
+  // `.lean()` does not cast, so binary fields arrive as BSON Binary. Revive them
+  // before isUsableCreds and before the object is handed to Baileys.
+  const storedCreds = storedRow ? reviveStoredValue(storedRow.value) : null;
   const hadStoredCreds = isUsableCreds(storedCreds);
   if (storedRow && !hadStoredCreds) {
     // Remove the unusable record so the next save writes a clean one.
@@ -120,10 +158,13 @@ async function createMongoAuthState(doctorId, options = {}) {
       const data = {};
       for (const row of rows) {
         if (row.value === null || row.value === undefined) continue;
+        // Binary values come back from the driver as BSON Binary. Revive them at
+        // every level before Baileys uses them as Signal keys.
+        const value = reviveStoredValue(row.value);
         // Baileys round-trips app state sync keys through a protobuf type, so a
         // plain object read back from the database must be revived the same way
         // the file store revives it.
-        data[row.storeId] = type === 'app-state-sync-key' ? reviveAppStateKey(row.value) : row.value;
+        data[row.storeId] = type === 'app-state-sync-key' ? reviveAppStateKey(value) : value;
       }
       return data;
     },
@@ -176,8 +217,8 @@ async function createMongoAuthState(doctorId, options = {}) {
   };
 }
 
-// Mongo returns BSON Binary as Buffer and plain objects as-is, so a stored record is
-// handed back unchanged; isUsableCreds decides whether it can be used.
+// App-state sync keys are stored as plain JSON objects. Rebuild the protobuf type
+// after the binary fields inside them have been revived.
 function reviveAppStateKey(value) {
   try {
     // eslint-disable-next-line global-require
@@ -188,13 +229,24 @@ function reviveAppStateKey(value) {
   }
 }
 
+// Lets the worker synchronizer discover a MongoDB-backed session after a deploy
+// without looking for a creds.json file that MongoDB never writes.
+async function hasStoredWhatsAppSession(doctorId, options = {}) {
+  const Model = options.Model || whatsappAuthSchema();
+  const row = await Model.findOne({ doctorId, storeType: 'creds', storeId: '' }).lean();
+  return isUsableCreds(row ? reviveStoredValue(row.value) : null);
+}
+
 module.exports = {
   EXPIRING_TYPES,
   PERSISTENT_TYPES,
   REQUIRED_CREDS_FIELDS,
   createMongoAuthState,
   documentId,
+  hasStoredWhatsAppSession,
+  isBsonBinary,
   isUsableCreds,
+  reviveStoredValue,
   toBuffer,
   toStorable,
   whatsappAuthSchema

@@ -1114,6 +1114,10 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
     response.json({
       status: state.status,
       qrDataUrl: state.qrDataUrl || null,
+      lastStatusCode: state.lastStatusCode ?? null,
+      lastError: state.lastError || null,
+      reconnectAttempt: state.reconnectAttempt || 0,
+      lastConnectedAt: state.lastConnectedAt || null,
       sessionPersistent: sessionInfo.persistent !== false,
       sessionNotice: sessionInfo.notice || null
     });

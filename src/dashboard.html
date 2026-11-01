@@ -1821,14 +1821,23 @@ function readFacilityPricing() {
         qr: state.qrDataUrl ? 'Scan this QR code with WhatsApp.' : 'Preparing QR code…',
         connected: 'WhatsApp is connected.',
         reconnecting: 'Connection interrupted. Reconnecting…',
-        loggedOut: 'WhatsApp was logged out. Connect again to relink this device.',
+        conflict: 'Another copy of the service is using this WhatsApp session. Waiting to take over…',
+        loggedOut: 'WhatsApp was logged out. Preparing a new QR code…',
         error: 'Could not start WhatsApp. Try again.'
       };
-      whatsappStatus.textContent = labels[state.status] || 'Not connected';
+      let statusText = labels[state.status] || 'Not connected';
+      if (['reconnecting', 'conflict', 'error'].includes(state.status) && state.lastError) {
+        statusText += ` (${state.lastError})`;
+      }
+      if (['reconnecting', 'conflict'].includes(state.status) && state.reconnectAttempt > 0) {
+        statusText += ` Attempt ${state.reconnectAttempt}.`;
+      }
+      whatsappStatus.textContent = statusText;
       if (statWhatsapp) {
         statWhatsapp.textContent = {
           connected: 'Connected', qr: 'Awaiting scan', starting: 'Connecting',
-          reconnecting: 'Reconnecting', loggedOut: 'Logged out', error: 'Error', disconnected: 'Not connected'
+          reconnecting: 'Reconnecting', conflict: 'Conflict', loggedOut: 'Logged out',
+          error: 'Error', disconnected: 'Not connected'
         }[state.status] || 'Not connected';
       }
       const sessionNotice = document.querySelector('#whatsapp-session-notice');
@@ -1836,13 +1845,16 @@ function readFacilityPricing() {
       sessionNotice.textContent = state.sessionNotice || '';
       whatsappQrPanel.hidden = !state.qrDataUrl;
       if (state.qrDataUrl) whatsappQr.src = state.qrDataUrl;
-      whatsappButton.disabled = ['starting', 'qr', 'connected', 'reconnecting'].includes(state.status);
+      whatsappButton.disabled = ['starting', 'qr', 'connected', 'reconnecting', 'conflict'].includes(state.status);
       whatsappButton.textContent = state.status === 'connected' ? 'WhatsApp connected' :
         state.status === 'starting' || state.status === 'qr' || state.status === 'reconnecting'
           ? 'Connecting…'
-          : 'Connect WhatsApp';
+          : state.status === 'conflict' ? 'Waiting…'
+            : 'Connect WhatsApp';
       if (['starting', 'qr', 'reconnecting'].includes(state.status)) {
         whatsappPollTimer = setTimeout(() => loadWhatsAppStatus().catch((error) => showError(error.message)), 1500);
+      } else if (state.status === 'conflict') {
+        whatsappPollTimer = setTimeout(() => loadWhatsAppStatus().catch((error) => showError(error.message)), 5000);
       }
     }
 

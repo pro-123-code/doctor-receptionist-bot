@@ -5,8 +5,13 @@ const fsPromises = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage } = require('@whiskeysockets/baileys');
-const { createMongoAuthState } = require('./whatsappAuthStore');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage, fetchLatestWaWebVersion } = require('@whiskeysockets/baileys');
+const { createMongoAuthState, hasStoredWhatsAppSession } = require('./whatsappAuthStore');
+const {
+  describeDisconnect,
+  reconnectDelayMs,
+  shouldWipeSession
+} = require('./whatsappConnection');
 const QRCode = require('qrcode');
 const mongoose = require('mongoose');
 const { Appointment, connectDatabase, deleteConversation, Doctor, getConversation, InboundMessage, InboundQueueLock, recordServiceLog, saveConversation } = require('./models');
@@ -58,8 +63,14 @@ const conversationLocks = new Map();
 const activeReminders = new Map();
 const whatsappSockets = new Map();
 const whatsappConnectionStates = new Map();
+const whatsappReconnectTimers = new Map();
 const startingDoctorIds = new Set();
 const inboundEventChains = new Map();
+let cachedWhatsAppWebVersion = null;
+let cachedWhatsAppWebVersionAt = 0;
+let cachedWhatsAppWebVersionRetryAt = 0;
+const WHATSAPP_WEB_VERSION_TTL_MS = 6 * 60 * 60 * 1000;
+const WHATSAPP_WEB_VERSION_RETRY_MS = 5 * 60 * 1000;
 const processingDoctorQueues = new Map();
 const completedHolidaySyncs = new Set();
 const activeHolidaySyncs = new Map();
@@ -174,7 +185,14 @@ mountDashboard(app, Appointment, timeZone, doctorId, {
   getWhatsAppConnectionStatus,
   getWhatsAppSessionInfo: getBaileysSessionInfo,
   listWhatsAppStatuses: () => [...whatsappConnectionStates.entries()]
-    .map(([doctorId, state]) => ({ doctorId, status: state.status })),
+    .map(([doctorId, state]) => ({
+      doctorId,
+      status: state.status,
+      lastStatusCode: state.lastStatusCode ?? null,
+      lastError: state.lastError || null,
+      reconnectAttempt: state.reconnectAttempt || 0,
+      lastConnectedAt: state.lastConnectedAt || null
+    })),
   syncReligiousHolidays: syncDoctorReligiousHolidays
 });
 
@@ -1433,10 +1451,85 @@ async function secureWhatsAppAuthDirectory(authDirectory) {
   if (process.platform !== 'win32') await fsPromises.chmod(authDirectory, 0o700);
 }
 
+// WhatsApp's web client version changes independently of the Baileys package.
+// A bundled version that is too old can be accepted far enough to show a QR and
+// then be refused after pairing, which looks exactly like a broken session. Use
+// the current web version when it can be fetched and fall back to the bundled one.
+async function resolveWhatsAppWebVersion() {
+  const now = Date.now();
+  if (cachedWhatsAppWebVersion && now - cachedWhatsAppWebVersionAt < WHATSAPP_WEB_VERSION_TTL_MS) {
+    return cachedWhatsAppWebVersion;
+  }
+  // A failed lookup must not add ten seconds to every reconnect attempt.
+  if (now < cachedWhatsAppWebVersionRetryAt) return cachedWhatsAppWebVersion;
+  try {
+    const result = await fetchLatestWaWebVersion({ timeout: 10000 });
+    const version = result?.version;
+    if (result?.error) {
+      cachedWhatsAppWebVersionRetryAt = now + WHATSAPP_WEB_VERSION_RETRY_MS;
+      console.warn(`WhatsApp web version lookup failed (${result.error?.name || 'Error'}); using the bundled version.`);
+      return cachedWhatsAppWebVersion;
+    }
+    if (Array.isArray(version) && version.length === 3 && version.every(Number.isFinite)) {
+      cachedWhatsAppWebVersion = version;
+      cachedWhatsAppWebVersionAt = now;
+      return version;
+    }
+    cachedWhatsAppWebVersionRetryAt = now + WHATSAPP_WEB_VERSION_RETRY_MS;
+  } catch (error) {
+    cachedWhatsAppWebVersionRetryAt = now + WHATSAPP_WEB_VERSION_RETRY_MS;
+    console.warn(`WhatsApp web version lookup failed (${error?.name || 'Error'}); using the bundled version.`);
+  }
+  return cachedWhatsAppWebVersion;
+}
+
+async function hasStoredWhatsAppCredentials(targetDoctorId) {
+  if (mongoSessionsAvailable()) {
+    try {
+      return await hasStoredWhatsAppSession(targetDoctorId);
+    } catch (error) {
+      logServiceError('WhatsApp session lookup', error, [], targetDoctorId, 'warn');
+      return false;
+    }
+  }
+  try {
+    return fs.existsSync(path.join(getWhatsAppAuthDirectory(targetDoctorId), 'creds.json'));
+  } catch {
+    return false;
+  }
+}
+
+function clearWhatsAppReconnectTimer(targetDoctorId) {
+  const timer = whatsappReconnectTimers.get(targetDoctorId);
+  if (!timer) return;
+  clearTimeout(timer);
+  whatsappReconnectTimers.delete(targetDoctorId);
+}
+
+function scheduleWhatsAppReconnect(doctorProfile, attempt, statusCode, beforeReconnect) {
+  const targetDoctorId = doctorProfile.doctorId;
+  clearWhatsAppReconnectTimer(targetDoctorId);
+  const delayMs = reconnectDelayMs(attempt, statusCode);
+  const timer = setTimeout(() => {
+    whatsappReconnectTimers.delete(targetDoctorId);
+    Promise.resolve()
+      .then(() => (typeof beforeReconnect === 'function' ? beforeReconnect() : undefined))
+      .then(() => startDoctorWhatsApp(doctorProfile))
+      .catch((error) => logServiceError('WhatsApp reconnect', error, [], targetDoctorId));
+  }, delayMs);
+  timer.unref?.();
+  whatsappReconnectTimers.set(targetDoctorId, timer);
+  return delayMs;
+}
+
 async function connectDoctorWhatsApp(targetDoctorId) {
   const doctorProfile = await Doctor.findOne({ doctorId: targetDoctorId, isActive: true })
     .select('+googleCredentialsEncrypted').lean();
   if (!doctorProfile) throw new Error('Doctor account is inactive');
+  // A manual click is also the doctor's way out of a backoff. Drop any queued
+  // retry so two starts cannot race, then start once with a clean attempt count.
+  clearWhatsAppReconnectTimer(targetDoctorId);
+  whatsappConnectionStates.set(targetDoctorId, { status: 'starting' });
   await startDoctorWhatsApp(doctorProfile);
   return getWhatsAppConnectionStatus(targetDoctorId);
 }
@@ -1448,12 +1541,22 @@ app.use((_request, response) => {
 async function startDoctorWhatsApp(doctorProfile) {
   const targetDoctorId = doctorProfile.doctorId;
   if (!doctorProfile.isActive || whatsappSockets.has(targetDoctorId) || startingDoctorIds.has(targetDoctorId)) return;
+  clearWhatsAppReconnectTimer(targetDoctorId);
   startingDoctorIds.add(targetDoctorId);
-  whatsappConnectionStates.set(targetDoctorId, { status: 'starting' });
+  const previousState = whatsappConnectionStates.get(targetDoctorId) || {};
+  whatsappConnectionStates.set(targetDoctorId, {
+    status: 'starting',
+    reconnectAttempt: previousState.reconnectAttempt || 0,
+    lastStatusCode: previousState.lastStatusCode ?? null,
+    lastError: previousState.lastError || null,
+    lastConnectedAt: previousState.lastConnectedAt || null
+  });
 
   const authDirectory = getWhatsAppAuthDirectory(targetDoctorId);
   let socket;
   let saveCreds;
+  let credsSaveChain = Promise.resolve();
+  let connectionTimeout = null;
   // Kept outside the try so the connection handler below can clear a session that
   // WhatsApp has revoked; a logged out device can never be reused.
   let authState = null;
@@ -1479,68 +1582,166 @@ async function startDoctorWhatsApp(doctorProfile) {
       whatsappAuthMode = 'file';
     }
     saveCreds = authState.saveCreds;
+    // Baileys does not await an event listener. Serialize writes and keep the
+    // promise so a reconnect never starts from an older credential record than
+    // the handshake just wrote.
+    const persistCreds = () => {
+      credsSaveChain = credsSaveChain
+        .then(() => saveCreds())
+        .catch((error) => logServiceError('WhatsApp credentials save', error, [], targetDoctorId, 'warn'));
+      return credsSaveChain;
+    };
+    const waVersion = await resolveWhatsAppWebVersion();
     socket = makeWASocket({
       auth: authState.state,
+      ...(waVersion ? { version: waVersion } : {}),
       browser: ['Doctor Receptionist', 'Chrome', '1.0.0'],
+      connectTimeoutMs: 60000,
       markOnlineOnConnect: false,
       syncFullHistory: false
     });
     whatsappSockets.set(targetDoctorId, socket);
+
+    // A socket that never reaches QR or open is not going to recover on its own.
+    // This also bounds a hung DNS/WebSocket attempt on a cold free instance.
+    connectionTimeout = setTimeout(() => {
+      if (whatsappSockets.get(targetDoctorId) !== socket) return;
+      const state = whatsappConnectionStates.get(targetDoctorId);
+      // A QR code is meant to wait for the doctor's phone, and an open socket is
+      // already healthy. Only a handshake that never reached either is stuck.
+      if (state?.status === 'qr' || state?.status === 'connected') return;
+      console.warn(`WhatsApp connection timed out for doctor ${targetDoctorId}; retrying.`);
+      try {
+        socket.end(new Error('WhatsApp connection timed out'));
+      } catch {
+        // The close event still schedules the retry.
+      }
+    }, 60000);
+    connectionTimeout.unref?.();
+
+    socket.ev.on('creds.update', persistCreds);
+    socket.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+      if (qr) {
+        if (whatsappSockets.get(targetDoctorId) !== socket) return;
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+        }
+        const state = {
+          status: 'qr',
+          qrDataUrl: null,
+          reconnectAttempt: 0,
+          lastStatusCode: null,
+          lastError: null,
+          lastConnectedAt: previousState.lastConnectedAt || null
+        };
+        whatsappConnectionStates.set(targetDoctorId, state);
+        QRCode.toDataURL(qr, { errorCorrectionLevel: 'M', margin: 2, width: 320 })
+          .then((qrDataUrl) => {
+            if (whatsappConnectionStates.get(targetDoctorId) === state) state.qrDataUrl = qrDataUrl;
+          })
+          .catch((error) => {
+            whatsappConnectionStates.set(targetDoctorId, { status: 'error' });
+            logServiceError('WhatsApp QR generation', error, [], targetDoctorId);
+          });
+      }
+      if (connection === 'open') {
+        if (whatsappSockets.get(targetDoctorId) !== socket) return;
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+        }
+        clearWhatsAppReconnectTimer(targetDoctorId);
+        whatsappConnectionStates.set(targetDoctorId, {
+          status: 'connected',
+          reconnectAttempt: 0,
+          lastStatusCode: null,
+          lastError: null,
+          lastConnectedAt: new Date().toISOString()
+        });
+        console.log(`WhatsApp connection ready for doctor ${doctorProfile.doctorId}.`);
+        restoreAppointmentReminders(doctorProfile).catch((error) =>
+          logServiceError('Reminder restoration', error, [], doctorProfile.doctorId));
+        setTimeout(() => startDoctorQueueProcessor(doctorProfile, socket), 2500).unref();
+      }
+      if (connection === 'close') {
+        const isCurrentSocket = whatsappSockets.get(targetDoctorId) === socket;
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+        }
+        // A replaced socket must never schedule another connection. Only the
+        // socket in the map owns the reconnect loop.
+        if (!isCurrentSocket) return;
+        whatsappSockets.delete(targetDoctorId);
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const errorMessage = lastDisconnect?.error?.message || '';
+        const detail = errorMessage
+          ? `${describeDisconnect(statusCode)}: ${errorMessage.slice(0, 160)}`
+          : describeDisconnect(statusCode);
+        const current = whatsappConnectionStates.get(targetDoctorId) || {};
+        const attempt = (current.reconnectAttempt || 0) + 1;
+        const baseState = {
+          status: 'reconnecting',
+          reconnectAttempt: attempt,
+          lastStatusCode: statusCode ?? null,
+          lastError: detail,
+          lastConnectedAt: current.lastConnectedAt || null
+        };
+        console.warn(`WhatsApp connection closed for doctor ${targetDoctorId}`
+          + `${statusCode ? ` (code ${statusCode})` : ''}: ${detail}; attempt ${attempt}.`);
+        recordServiceLog('WhatsApp connection closed', statusCode ? String(statusCode) : 'unknown', targetDoctorId, 'warn');
+
+        if (shouldWipeSession(statusCode)) {
+          // WhatsApp refused the stored device session. Keeping it guarantees the
+          // same failure on every retry, which is the endless "reconnecting" loop.
+          whatsappConnectionStates.set(targetDoctorId, {
+            ...baseState,
+            status: statusCode === DisconnectReason.loggedOut ? 'loggedOut' : 'reconnecting'
+          });
+          (async () => {
+            // Let an in-flight credential write finish before deleting the record,
+            // otherwise it can recreate the bad session after the wipe.
+            try {
+              await credsSaveChain;
+            } catch {
+              // saveCreds already logged the failure; wiping is still correct.
+            }
+            try {
+              if (authState && typeof authState.wipe === 'function') await authState.wipe();
+            } catch (error) {
+              logServiceError('WhatsApp session wipe', error, [], targetDoctorId, 'warn');
+            }
+            await clearWhatsAppAuthDirectory(authDirectory);
+          })().then(() => {
+            scheduleWhatsAppReconnect(doctorProfile, attempt, statusCode);
+          }).catch((error) => {
+            logServiceError('WhatsApp reconnect', error, [], targetDoctorId);
+          });
+        } else {
+          whatsappConnectionStates.set(targetDoctorId, baseState);
+          scheduleWhatsAppReconnect(doctorProfile, attempt, statusCode, () => credsSaveChain);
+        }
+      }
+    });
   } catch (error) {
-    whatsappConnectionStates.set(targetDoctorId, { status: 'error' });
+    if (socket && whatsappSockets.get(targetDoctorId) === socket) {
+      whatsappSockets.delete(targetDoctorId);
+      try {
+        socket.end(error);
+      } catch {
+        // The socket never finished starting.
+      }
+    }
+    whatsappConnectionStates.set(targetDoctorId, {
+      status: 'error',
+      lastError: error?.message || 'Could not start WhatsApp',
+      reconnectAttempt: (whatsappConnectionStates.get(targetDoctorId)?.reconnectAttempt || 0) + 1
+    });
     throw error;
   } finally {
     startingDoctorIds.delete(targetDoctorId);
   }
-
-  socket.ev.on('creds.update', saveCreds);
-  socket.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-    if (qr) {
-      const state = { status: 'qr', qrDataUrl: null };
-      whatsappConnectionStates.set(targetDoctorId, state);
-      QRCode.toDataURL(qr, { errorCorrectionLevel: 'M', margin: 2, width: 320 })
-        .then((qrDataUrl) => {
-          if (whatsappConnectionStates.get(targetDoctorId) === state) state.qrDataUrl = qrDataUrl;
-        })
-        .catch((error) => {
-          whatsappConnectionStates.set(targetDoctorId, { status: 'error' });
-          logServiceError('WhatsApp QR generation', error, [], targetDoctorId);
-        });
-    }
-    if (connection === 'open') {
-      whatsappConnectionStates.set(targetDoctorId, { status: 'connected' });
-      console.log(`WhatsApp connection ready for doctor ${doctorProfile.doctorId}.`);
-      restoreAppointmentReminders(doctorProfile).catch((error) =>
-        logServiceError('Reminder restoration', error, [], doctorProfile.doctorId));
-      setTimeout(() => startDoctorQueueProcessor(doctorProfile, socket), 2500).unref();
-    }
-    if (connection === 'close') {
-      if (whatsappSockets.get(doctorProfile.doctorId) === socket) {
-        whatsappSockets.delete(doctorProfile.doctorId);
-      }
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      if (statusCode !== DisconnectReason.loggedOut) {
-        whatsappConnectionStates.set(targetDoctorId, { status: 'reconnecting' });
-        console.log(`WhatsApp connection closed for doctor ${doctorProfile.doctorId}; reconnecting.`);
-        setTimeout(() => startDoctorWhatsApp(doctorProfile).catch((error) =>
-          logServiceError('WhatsApp reconnect', error, [], doctorProfile.doctorId)), 3000).unref();
-      } else {
-        whatsappConnectionStates.set(targetDoctorId, { status: 'loggedOut' });
-        console.error(`WhatsApp logged out for doctor ${doctorProfile.doctorId}. Re-link that clinic's number.`);
-        // The credentials WhatsApp revoked can never open a session again. Clearing
-        // them is what lets the next "Connect WhatsApp" click show a fresh QR code
-        // instead of failing forever against a dead device session.
-        (async () => {
-          try {
-            if (authState && typeof authState.wipe === 'function') await authState.wipe();
-          } catch {
-            // A failed wipe must not stop the directory cleanup below.
-          }
-          await clearWhatsAppAuthDirectory(authDirectory);
-        })().catch(() => {});
-      }
-    }
-  });
 
   socket.ev.on('messages.upsert', ({ messages, type }) => {
     if (!['notify', 'append'].includes(type)) return;
@@ -1563,17 +1764,27 @@ async function synchronizeDoctorWorkers() {
   for (const [connectedDoctorId, socket] of whatsappSockets) {
     if (!activeDoctorIds.has(connectedDoctorId)) {
       whatsappSockets.delete(connectedDoctorId);
+      clearWhatsAppReconnectTimer(connectedDoctorId);
       socket.end(new Error('Doctor account deactivated'));
     }
+  }
+  for (const doctorIdWithTimer of whatsappReconnectTimers.keys()) {
+    if (!activeDoctorIds.has(doctorIdWithTimer)) clearWhatsAppReconnectTimer(doctorIdWithTimer);
   }
 
   for (const doctorProfile of activeDoctors) {
     if (doctorProfile.googleCalendarConnected) {
       syncDoctorReligiousHolidays(doctorProfile.doctorId).catch(() => {});
     }
-    if (doctorProfile.setupComplete && !whatsappSockets.has(doctorProfile.doctorId)) {
-      const authDirectory = getWhatsAppAuthDirectory(doctorProfile.doctorId);
-      if (fs.existsSync(path.join(authDirectory, 'creds.json'))) {
+    if (
+      doctorProfile.setupComplete &&
+      !whatsappSockets.has(doctorProfile.doctorId) &&
+      !whatsappReconnectTimers.has(doctorProfile.doctorId)
+    ) {
+      // On a platform whose filesystem is wiped, the session exists only in
+      // MongoDB. Checking for creds.json here meant a deploy or a wake from sleep
+      // left WhatsApp disconnected until the doctor clicked Connect again.
+      if (await hasStoredWhatsAppCredentials(doctorProfile.doctorId)) {
         startDoctorWhatsApp(doctorProfile).catch((error) =>
           logServiceError('WhatsApp startup', error, [], doctorProfile.doctorId));
       } else if (!whatsappConnectionStates.has(doctorProfile.doctorId)) {

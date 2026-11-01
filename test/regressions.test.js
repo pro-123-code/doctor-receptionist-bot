@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 const ExcelJS = require('exceljs');
 const ffmpegStatic = require('ffmpeg-static');
@@ -25,6 +26,7 @@ const { createMailTransport, dispatchDoctorDailyReport, startDailyReportSchedule
 const { privacyPolicy, termsOfService } = require('../src/legalPages');
 const { buildOfferOrder, formatSlotOffer, getSlotLocalDateKey, getZonedDateParts, isMoreSlotRequest, paginateSlots } = require('../src/slotOffers');
 const { SLOT_DURATION_OPTIONS, clampSlotDuration, currentLocalTime, isOfferedSlotDuration, isReportCatchUpDue, isReportDueNow, isValidHourSetting, LIMITS, normalizeClinicTimingInput, normalizeReportTime, reportCatchUpMinutes, resolveClinicTiming } = require('../src/clinicTiming');
+const { describeDisconnect, reconnectDelayMs, shouldWipeSession } = require('../src/whatsappConnection');
 
 require('../src/models');
 
@@ -732,11 +734,12 @@ test('WhatsApp dashboard routes are doctor-scoped and return browser QR state', 
     const [statusAuth, statusHandler] = routes.get('GET /api/dashboard/whatsapp/status');
     await statusAuth(request, response, () => {});
     statusHandler(request, response);
-    assert.deepEqual(response.body, {
-      ...qrState,
-      sessionPersistent: true,
-      sessionNotice: null
-    });
+    assert.equal(response.body.status, qrState.status);
+    assert.equal(response.body.qrDataUrl, qrState.qrDataUrl);
+    assert.equal(response.body.sessionPersistent, true);
+    assert.equal(response.body.sessionNotice, null);
+    assert.equal(response.body.lastStatusCode, null);
+    assert.equal(response.body.reconnectAttempt, 0);
   } finally {
     DashboardUser.findById = originalFindById;
     Doctor.findOne = originalDoctorFindOne;
@@ -4156,6 +4159,142 @@ test('the credential fields the store insists on match what Baileys generates', 
     'a freshly generated credential set must be accepted as usable');
 });
 
+test('BSON Binary credential material is revived to Buffer before Baileys sees it', async () => {
+  // The MongoDB driver returns binary values as BSON Binary, not Node Buffers.
+  // A fake collection that stores Buffers hides this, and Baileys' Noise
+  // handshake then fails on every reconnect. Round-trip through real BSON here.
+  const { BSON } = mongoose.mongo;
+  const {
+    createMongoAuthState,
+    isBsonBinary
+  } = require('../src/whatsappAuthStore');
+  const creds = {
+    noiseKey: { private: Buffer.from([1, 2, 3]), public: Buffer.from([4, 5, 6]) },
+    signedIdentityKey: { private: Buffer.from([7, 8]), public: Buffer.from([9, 10]) },
+    signedPreKey: {
+      keyId: 1,
+      keyPair: { private: Buffer.from([11]), public: Buffer.from([12]) },
+      signature: Buffer.from([13])
+    },
+    registrationId: 1234,
+    advSecretKey: 'adv-secret',
+    registered: true,
+    me: { id: '923001234567:1@s.whatsapp.net' }
+  };
+  const stored = BSON.deserialize(BSON.serialize({ value: creds })).value;
+  assert.equal(isBsonBinary(stored.noiseKey.private), true,
+    'the driver really does return a BSON Binary for a stored Buffer');
+
+  const Model = createFakeCollection([{
+    doctorId: 'clinic-bson', storeType: 'creds', storeId: '', value: stored, expiresAt: null
+  }]);
+  const auth = await createMongoAuthState('clinic-bson', { Model, initAuthCreds: initFakeCreds });
+  assert.equal(auth.hadStoredCreds, true);
+  assert.ok(Buffer.isBuffer(auth.state.creds.noiseKey.private),
+    'the Noise key must be a Buffer, not a BSON Binary');
+  assert.deepEqual([...auth.state.creds.noiseKey.private], [1, 2, 3]);
+  assert.ok(Buffer.isBuffer(auth.state.creds.signedPreKey.keyPair.private));
+});
+
+test('credentials and keys survive a BSON round trip through the store', async () => {
+  const { BSON } = mongoose.mongo;
+  const { createMongoAuthState } = require('../src/whatsappAuthStore');
+  const Model = createFakeCollection();
+  // A real collection serializes every write with BSON. Reproduce that here so a
+  // fake collection can never again hide Binary-vs-Buffer regressions.
+  const nativeUpdateOne = Model.updateOne;
+  Model.updateOne = async (filter, update, options) => {
+    if (update?.$set?.value !== undefined) {
+      update.$set.value = BSON.deserialize(BSON.serialize({ value: update.$set.value })).value;
+    }
+    return nativeUpdateOne(filter, update, options);
+  };
+  const realishCreds = () => ({
+    ...makeFakeCreds(),
+    noiseKey: { private: Buffer.from([1, 2]), public: Buffer.from([3, 4]) },
+    signedIdentityKey: { private: Buffer.from([5]), public: Buffer.from([6]) },
+    signedPreKey: {
+      keyId: 1,
+      keyPair: { private: Buffer.from([7]), public: Buffer.from([8]) },
+      signature: Buffer.from([9])
+    },
+    registered: true
+  });
+
+  const auth = await createMongoAuthState('clinic-roundtrip', {
+    Model, initAuthCreds: realishCreds
+  });
+  await auth.saveCreds();
+  await auth.state.keys.set({ session: { 'S-1': Buffer.from([10, 11, 12]) } });
+
+  const reopened = await createMongoAuthState('clinic-roundtrip', {
+    Model, initAuthCreds: realishCreds
+  });
+  assert.equal(reopened.hadStoredCreds, true);
+  assert.ok(Buffer.isBuffer(reopened.state.creds.noiseKey.private));
+  assert.deepEqual([...reopened.state.creds.noiseKey.private], [1, 2]);
+  const keys = await reopened.state.keys.get('session', ['S-1']);
+  assert.ok(Buffer.isBuffer(keys['S-1']));
+  assert.deepEqual([...keys['S-1']], [10, 11, 12]);
+});
+
+test('Signal keys read from MongoDB are revived to Buffer', async () => {
+  const { BSON } = mongoose.mongo;
+  const { createMongoAuthState } = require('../src/whatsappAuthStore');
+  const stored = BSON.deserialize(BSON.serialize({ value: Buffer.from([5, 6, 7]) })).value;
+  const Model = createFakeCollection([{
+    doctorId: 'clinic-binary-key', storeType: 'session', storeId: 'S-1', value: stored, expiresAt: null
+  }]);
+  const auth = await createMongoAuthState('clinic-binary-key', { Model, initAuthCreds: initFakeCreds });
+  const fetched = await auth.state.keys.get('session', ['S-1']);
+  assert.ok(Buffer.isBuffer(fetched['S-1']));
+  assert.deepEqual([...fetched['S-1']], [5, 6, 7]);
+});
+
+test('a MongoDB session is discovered without a creds.json file after a restart', async () => {
+  await withFakeAuthCollection(async (Model) => {
+    const { createMongoAuthState, hasStoredWhatsAppSession } = require('../src/whatsappAuthStore');
+    const auth = await createMongoAuthState('clinic-discovery', { Model, initAuthCreds: initFakeCreds });
+    assert.equal(await hasStoredWhatsAppSession('clinic-discovery', { Model }), false);
+    await auth.saveCreds();
+    assert.equal(await hasStoredWhatsAppSession('clinic-discovery', { Model }), true);
+  });
+});
+
+test('the worker synchronization discovers a MongoDB-backed session after a deploy', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const marker = source.indexOf('async function synchronizeDoctorWorkers');
+  assert.ok(marker > 0);
+  const branch = source.slice(marker, marker + 2400);
+  assert.match(branch, /hasStoredWhatsAppCredentials/,
+    'the startup path must consult MongoDB instead of only looking for creds.json');
+  assert.doesNotMatch(branch, /fs\.existsSync\(path\.join\(authDirectory, 'creds\.json'\)\)/,
+    'a MongoDB session never writes creds.json, so that check strands the clinic');
+});
+
+test('a refused WhatsApp session is wiped instead of retried forever', () => {
+  for (const code of [401, 403, 411, 500]) {
+    assert.equal(shouldWipeSession(code), true, `status ${code} leaves a session that cannot heal`);
+  }
+  assert.equal(shouldWipeSession(428), false, 'a normal disconnect must keep the working session');
+  assert.equal(shouldWipeSession(440), false, 'a conflict belongs to another live socket');
+  assert.equal(describeDisconnect(500), 'WhatsApp rejected the stored session');
+  assert.equal(reconnectDelayMs(1, 515), 1000, 'pairing restart should reconnect immediately');
+  assert.equal(reconnectDelayMs(1, 440), 30000, 'a competing socket needs time to exit');
+  assert.equal(reconnectDelayMs(1, 428), 3000);
+  assert.equal(reconnectDelayMs(2, 428), 5000);
+  assert.equal(reconnectDelayMs(99, 428), 60000, 'backoff must be capped');
+});
+
+test('the socket uses the current WhatsApp web version and owns its reconnect loop', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(source, /fetchLatestWaWebVersion/,
+    'the bundled protocol version goes stale independently of the package');
+  assert.match(source, /version: waVersion/);
+  assert.match(source, /if \(!isCurrentSocket\) return;/, 'a replaced socket must not reconnect');
+  assert.match(source, /scheduleWhatsAppReconnect/);
+});
+
 test('an appointment range shows bookings across several days', async () => {
   const previousSecret = process.env.DASHBOARD_SESSION_SECRET;
   const secret = 'range-session-secret-long-enough';
@@ -4796,11 +4935,13 @@ test('a logged out WhatsApp session is wiped so the next connect can show a QR c
   // WhatsApp revokes the device on logout, so the stored credentials are dead.
   // Keeping them means every reconnect fails and the doctor can never re-link.
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
-  const marker = source.indexOf("whatsappConnectionStates.set(targetDoctorId, { status: 'loggedOut' })");
-  assert.ok(marker > 0, 'the logged out branch must exist');
-  const branch = source.slice(marker, marker + 900);
-  assert.match(branch, /authState\.wipe\(\)/,
+  const marker = source.indexOf('if (shouldWipeSession(statusCode))');
+  assert.ok(marker > 0, 'the session-refused branch must exist');
+  const branch = source.slice(marker, marker + 2600);
+  assert.match(branch, /authState[\s\S]{0,160}wipe\(\)/,
     'the revoked session must be deleted before the next connect attempt');
+  assert.match(branch, /clearWhatsAppAuthDirectory\(authDirectory\)/,
+    'a stale on-disk copy must not be left behind');
 });
 
 test('the two WhatsApp session warnings cannot contradict each other', () => {
