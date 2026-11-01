@@ -123,6 +123,7 @@ async function main() {
     process.exit(1);
   }
   console.log('Deployment verified: the live site is serving the latest build.');
+  process.exit(0);
 }
 
-main();
+main().catch((error) => { console.error(error); process.exit(1); });

@@ -1556,6 +1556,7 @@ async function startDoctorWhatsApp(doctorProfile) {
   let socket;
   let saveCreds;
   let credsSaveChain = Promise.resolve();
+  let keysSaveChain = Promise.resolve();
   let connectionTimeout = null;
   // Kept outside the try so the connection handler below can clear a session that
   // WhatsApp has revoked; a logged out device can never be reused.
@@ -1582,6 +1583,21 @@ async function startDoctorWhatsApp(doctorProfile) {
       whatsappAuthMode = 'file';
     }
     saveCreds = authState.saveCreds;
+    // Signal keys are written through the same Mongo collection but on their own
+    // async path. Baileys does not always await those writes, so track them
+    // separately and wait for them before any restart or wipe; otherwise a 515
+    // reconnect can start before the paired device's keys exist and WhatsApp
+    // revokes the session with a 401 a minute later.
+    keysSaveChain = Promise.resolve();
+    if (authState?.state?.keys && typeof authState.state.keys.set === 'function') {
+      const originalKeysSet = authState.state.keys.set.bind(authState.state.keys);
+      authState.state.keys.set = (data) => {
+        keysSaveChain = keysSaveChain
+          .then(() => originalKeysSet(data))
+          .catch((error) => logServiceError('WhatsApp key save', error, [], targetDoctorId, 'warn'));
+        return keysSaveChain;
+      };
+    }
     // Baileys does not await an event listener. Serialize writes and keep the
     // promise so a reconnect never starts from an older credential record than
     // the handshake just wrote.
@@ -1659,6 +1675,7 @@ async function startDoctorWhatsApp(doctorProfile) {
           lastError: null,
           lastConnectedAt: new Date().toISOString()
         });
+        persistCreds();
         console.log(`WhatsApp connection ready for doctor ${doctorProfile.doctorId}.`);
         restoreAppointmentReminders(doctorProfile).catch((error) =>
           logServiceError('Reminder restoration', error, [], doctorProfile.doctorId));
@@ -1703,7 +1720,7 @@ async function startDoctorWhatsApp(doctorProfile) {
             // Let an in-flight credential write finish before deleting the record,
             // otherwise it can recreate the bad session after the wipe.
             try {
-              await credsSaveChain;
+              await Promise.all([credsSaveChain, keysSaveChain]);
             } catch {
               // saveCreds already logged the failure; wiping is still correct.
             }
@@ -1720,7 +1737,7 @@ async function startDoctorWhatsApp(doctorProfile) {
           });
         } else {
           whatsappConnectionStates.set(targetDoctorId, baseState);
-          scheduleWhatsAppReconnect(doctorProfile, attempt, statusCode, () => credsSaveChain);
+          scheduleWhatsAppReconnect(doctorProfile, attempt, statusCode, () => Promise.all([credsSaveChain, keysSaveChain]));
         }
       }
     });
