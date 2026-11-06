@@ -1325,6 +1325,7 @@ async function enqueueWhatsAppMessages(doctorProfile, socket, messages) {
     }
 
     try {
+    recordServiceLog('WhatsApp message received', audioMessage ? 'audio' : 'text', doctorProfile.doctorId, 'info');
       await enqueueInboundMessage(InboundMessage, {
         doctorId: doctorProfile.doctorId,
         senderJid,
