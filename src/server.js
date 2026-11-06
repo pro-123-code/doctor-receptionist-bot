@@ -1260,6 +1260,7 @@ function startDoctorQueueProcessor(doctorProfile, socket) {
       },
       async deliverReply(senderJid, text) {
         await socket.sendMessage(senderJid, { text });
+        recordServiceLog('WhatsApp reply sent', 'outbound', doctorProfile.doctorId, 'info');
       },
       async onFailure(error, message, retry) {
         logServiceError('WhatsApp message queue', error, [], targetDoctorId);
@@ -1762,6 +1763,7 @@ async function startDoctorWhatsApp(doctorProfile) {
 
   socket.ev.on('messages.upsert', ({ messages, type }) => {
     if (!['notify', 'append'].includes(type)) return;
+    if (type === 'notify') recordServiceLog('WhatsApp messages.upsert', String(messages?.length || 0), doctorProfile.doctorId, 'info');
     const targetDoctorId = doctorProfile.doctorId;
     const previousBatch = inboundEventChains.get(targetDoctorId) || Promise.resolve();
     const currentBatch = previousBatch
