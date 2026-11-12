@@ -1615,6 +1615,7 @@ async function startDoctorWhatsApp(doctorProfile) {
       ...(waVersion ? { version: waVersion } : {}),
       browser: ['Doctor Receptionist', 'Chrome', '1.0.0'],
       connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 25000,
       markOnlineOnConnect: false,
       syncFullHistory: false
     });

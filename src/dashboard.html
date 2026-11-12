@@ -2084,6 +2084,13 @@ function readFacilityPricing() {
       });
     }
 
+    if (mailButton) {
+      mailButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        window.location.href = mailtoHref(adminEmail);
+      });
+    }
+
     if (closeButton) closeButton.addEventListener('click', () => dialog && dialog.close && dialog.close());
 
     if (copyButton) {
@@ -2118,7 +2125,8 @@ function readFacilityPricing() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             email: document.querySelector('#email').value,
-            password: document.querySelector('#password').value
+            password: document.querySelector('#password').value,
+            remember: Boolean(document.querySelector('#remember')?.checked),
           })
         });
         if (!response.ok) throw new Error(response.status === 503 ? 'Dashboard login is not configured.' : 'Email or password is incorrect.');

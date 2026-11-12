@@ -2,6 +2,26 @@ const crypto = require('node:crypto');
 const nodemailer = require('nodemailer');
 const { Appointment, claimDailyReportRun, completeDailyReportRun, Doctor, recordServiceLog } = require('./models');
 const { generateAppointmentsWorkbook } = require('./excelGenerator');
+
+function toCsvCell(value) {
+  const text = value === null || value === undefined ? '' : String(value);
+  const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+  return /[",\\r\\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
+
+function buildAppointmentsCsv(appointments, timeZone, clinicName) {
+  const lines = [
+    [`Appointments - ${clinicName || 'Clinic'}`],
+    ['Window', 'Next 24 hours'],
+    [],
+    ['Patient', 'WhatsApp', 'Symptoms', 'Start', 'End'].map(toCsvCell).join(','),
+    ...appointments.map((row) => [
+      row.details?.name, row.details?.contactNumber, row.details?.majorSymptoms,
+      new Date(row.slotStart).toISOString(), new Date(row.slotEnd).toISOString()
+    ].map(toCsvCell).join(','))
+  ];
+  return `\\uFEFF${lines.join('\\r\\n')}`;
+}
 const { getLocalDateParts } = require('./dateParser');
 const { isReportCatchUpDue, reportCatchUpMinutes } = require('./clinicTiming');
 
@@ -99,7 +119,7 @@ async function dispatchDoctorDailyReport(doctorProfile, options = {}) {
       return { sent: false, reason: transportContext.reason };
     }
 
-    const workbook = await generateAppointmentsWorkbook(appointments, timeZone, currentDoctor.clinicName || 'Clinic');
+    const csv = buildAppointmentsCsv(appointments, timeZone, currentDoctor.clinicName || 'Clinic');
     if (!await Doctor.exists({ doctorId: reportDoctorId, isActive: true })) {
       return { sent: false, reason: 'doctor deactivated before send' };
     }
@@ -108,11 +128,11 @@ async function dispatchDoctorDailyReport(doctorProfile, options = {}) {
       from: process.env.EMAIL_FROM,
       to: currentDoctor.email,
       subject: `${currentDoctor.clinicName || 'Clinic'} Daily Appointments - ${reportDateKey}`,
-      text: `Daily report for ${currentDoctor.clinicName || 'Clinic'} on ${reportDateKey}: ${appointments.length} booked appointment(s). The attached spreadsheet includes patient names, contact details, stated symptoms, and appointment times.`,
+      text: `Daily report for ${currentDoctor.clinicName || 'Clinic'} on ${reportDateKey}: ${appointments.length} booked appointment(s). The attached CSV includes patient names, contact details, stated symptoms, and appointment times for the next 24 hours.`,
       attachments: [{
-        filename: `appointments-${reportDateKey}.xlsx`,
-        content: workbook,
-        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        filename: `appointments-${reportDateKey}.csv`,
+        content: csv,
+        contentType: 'text/csv; charset=utf-8'
       }]
     });
     console.log(`Daily appointment report emailed (${reportDoctorId}, ${reportDateKey}, ${appointments.length} appointments)`);

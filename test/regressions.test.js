@@ -663,12 +663,9 @@ test('the daily report emails an Excel attachment to the current doctor profile'
     assert.equal(sentMail.to, 'current@example.test');
     assert.equal(sentMail.from, 'reports@example.test');
     assert.match(sentMail.subject, /Email Clinic Daily Appointments/);
-    assert.equal(sentMail.attachments[0].contentType,
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(sentMail.attachments[0].content);
-    assert.equal(workbook.worksheets[0].getRow(2).getCell(1).value, 'Test Patient');
-    assert.equal(workbook.worksheets[0].getRow(2).getCell(5).value, 'booked');
+    assert.equal(sentMail.attachments[0].contentType, 'text/csv; charset=utf-8');
+    const csv = String(sentMail.attachments[0].content);
+    assert.match(csv, /Test Patient/);
     assert.equal(completion.update.$set.status, 'sent');
   } finally {
     Doctor.findOne = originalMethods.doctorFindOne;
