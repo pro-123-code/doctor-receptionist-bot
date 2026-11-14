@@ -1405,6 +1405,38 @@ function mountDashboard(app, Appointment, timeZone, clinicId, whatsappConnection
       response.status(503).json({ error: 'Doctor account could not be updated.' });
     }
   });
+  app.post('/api/admin/doctors/:doctorId/reset-password', requireDashboardAuth, requireSuperadmin, async (request, response) => {
+    const { password } = request.body || {};
+    let newPassword = typeof password === 'string' ? password : '';
+    if (!newPassword) {
+      newPassword = crypto.randomBytes(12).toString('base64url');
+    }
+    if (newPassword.length < 12 || newPassword.length > 256) {
+      return response.status(400).json({ error: 'Password must be 12 to 256 characters.' });
+    }
+    try {
+      const doctor = await Doctor.findOne({ doctorId: request.params.doctorId }).lean();
+      if (!doctor) return response.status(404).json({ error: 'Doctor not found' });
+      const updated = await DashboardUser.updateMany(
+        { doctorId: doctor.doctorId, role: 'DOCTOR' },
+        { $set: { passwordHash: await hashPassword(newPassword), isActive: true } }
+      );
+      if (!updated.modifiedCount && !updated.matchedCount) {
+        return response.status(404).json({ error: 'Doctor login account not found' });
+      }
+      await recordAuditAction(request, response, {
+        action: 'doctor.password.reset',
+        targetDoctorId: doctor.doctorId,
+        targetLabel: doctor.clinicName || '',
+        detail: 'Password reset by super admin'
+      });
+      response.json({ doctorId: doctor.doctorId, password: newPassword });
+    } catch (error) {
+      console.error(`Doctor password reset failed (${error?.name || 'Error'})`);
+      response.status(503).json({ error: 'Doctor password could not be reset.' });
+    }
+  });
+
 
   // ---------------------------------------------------------------------------
   // Super Admin control panel. Every route below requires the SUPERADMIN role.

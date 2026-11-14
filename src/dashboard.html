@@ -1967,6 +1967,33 @@ function readFacilityPricing() {
         edit.textContent = 'Edit';
         edit.addEventListener('click', () => editDoctorProfile(doctor.doctorId));
         actionCell.append(edit);
+        const resetPassword = document.createElement('button');
+        resetPassword.type = 'button';
+        resetPassword.className = 'btn btn-outline btn-sm !ml-2';
+        resetPassword.textContent = 'Reset password';
+        resetPassword.addEventListener('click', async () => {
+          const entered = window.prompt('New password for ' + (doctor.doctorName || doctor.doctorId) + ' (leave blank to generate one):');
+          if (entered === null) return;
+          const password = entered.trim() ? entered.trim() : undefined;
+          if (password && password.length < 12) {
+            showError('Password must be at least 12 characters.');
+            return;
+          }
+          try {
+            const response = await fetch(`/api/admin/doctors/${encodeURIComponent(doctor.doctorId)}/reset-password`, {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(password ? { password } : {})
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(result.error || 'Could not reset the password.');
+            window.alert(`Password reset complete.\\n\\nNew password: ${result.password}\\n\\nShare it securely with the doctor; it will not be shown again.`);
+          } catch (error) {
+            showError(error.message);
+          }
+        });
+        actionCell.append(resetPassword);
         const toggle = document.createElement('button');
         toggle.type = 'button';
         toggle.className = doctor.isActive ? 'btn btn-danger-ghost btn-sm !ml-2' : 'btn btn-outline btn-sm !ml-2';
