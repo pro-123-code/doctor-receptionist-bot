@@ -2087,7 +2087,16 @@ function readFacilityPricing() {
     if (mailButton) {
       mailButton.addEventListener('click', (event) => {
         event.preventDefault();
-        window.location.href = mailtoHref(adminEmail);
+        const href = mailtoHref(adminEmail);
+        // A direct location assignment is ignored by some browsers while a modal
+        // dialog is open, so build a real anchor and click it instead.
+        const link = document.createElement('a');
+        link.href = href;
+        link.rel = 'noopener';
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
       });
     }
 
