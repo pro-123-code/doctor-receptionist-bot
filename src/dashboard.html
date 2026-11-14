@@ -2090,9 +2090,9 @@ function readFacilityPricing() {
     if (mailButton) {
       mailButton.addEventListener('click', (event) => {
         event.preventDefault();
-        if (dialog && typeof dialog.close === 'function') dialog.close();
         const href = mailtoHref(adminEmail);
-        setTimeout(() => { window.location.href = href; }, 0);
+        if (dialog && typeof dialog.close === 'function') dialog.close();
+        window.location.href = href;
       });
     }
 
